@@ -63,7 +63,7 @@ brew install terminal-notifier
 > 读取优先级：userConfig 环境变量（方式 A）> 本地文件（方式 B/C）。
 
 ### 5. 重启会话验证
-- `ask_dialog` 工具在新会话才加载；`claude mcp list` 应显示 `ask-dialog ✔ Connected`
+- `ask_dialog` 在新会话**启动即常驻加载**（`alwaysLoad`，需 **Claude Code ≥ 2.1.121**），无需先 `ToolSearch`；`claude mcp list` 应显示 `ask-dialog ✔ Connected`
 - 测推送：`bash ~/.claude/.../hooks/notify-push.sh "测试" "通路确认"`（企业微信应 @你收到）
 
 ---
@@ -77,6 +77,7 @@ brew install terminal-notifier
 | `mention` | `@all` | 通知 @ 对象（`@all` 或手机号）|
 | `enable_permission_gate` | `false` | 开启「全权限弹窗门」：非白名单/非危险命令也弹桌面授权 |
 | `enable_notifications` | `true` | 通知提醒总开关：关闭后不发「完成/等待」通知与企业微信推送（弹窗提问/授权仍工作）|
+| `enable_wechat_push` | `true` | 企业微信手机推送独立开关：关闭后「超时未处理」不再 @你推企业微信，但本机桌面弹窗/横幅照常（比 `enable_notifications` 总开关更细：留本机通知、只去手机推送）|
 | `smart_switch` | `false` | 默认关=**始终弹浮顶窗**（多窗口最稳）；开启后看着 Claude 宿主(终端/IDE/app)就不弹、走终端 |
 
 ### 本地文件 `~/.claude/.notify-webhook`（userConfig 未设时回退）
@@ -96,6 +97,19 @@ brew install terminal-notifier
 
 ---
 
+## 故障排查
+
+| 症状 | 原因 / 解法 |
+|---|---|
+| **「完成/等待」通知 + 企业微信推送**突然**一起**没了 | `enable_notifications` 被设成了 `false` —— 它是**总开关**，关掉后两类通知一并静默（弹窗提问/授权仍工作）。`/plugin configure claude-notify@dax-tools` 或 settings.json 的 `pluginConfigs` 里确认它为 `true`（删掉该项 = 回到默认 `true`）。改完**重启会话**或开一次 `/hooks` 才生效。 |
+| 桌面**只有提示音、没横幅** | 没装 `terminal-notifier` 时这是**正常回退**（hook 无 tty/无 app 身份发不出系统横幅，故备选 afplay 声）。想要横幅：`brew install terminal-notifier`。 |
+| 装了 terminal-notifier **仍不弹横幅** | macOS「系统设置 → 通知 → **terminal-notifier**」里确认「允许通知」开着、「提醒样式」不是「无」。 |
+| 想自测通知却越测越乱 | ⚠️ **别用 `osascript display notification` 自测** —— 命令行 osascript 通知**没有固定 app 身份**，在 VS Code 等集成终端里经常静默失败（`exit 0` 但不显示、或时有声时没声），会严重误导排查。插件改用 `terminal-notifier` 正是为规避这点。要测就直接跑 `terminal-notifier -title 测试 -message ok -sound default`。 |
+| 每次任务结束**弹两次**横幅 | 你大概在自己的 settings.json 里**也**加了 Stop hook 调 terminal-notifier，与插件自带的 `notify-done.sh` 重复了。删掉自建那条即可——**完成通知插件已自带，无需另配 Stop hook**。 |
+| 该弹 `ask_dialog` 却没弹 | 见下方「工作机制 / 工具常驻」：需 Claude Code ≥ 2.1.121 让 `alwaysLoad` 生效；否则新会话首次得先 `ToolSearch` 加载。 |
+
+---
+
 ## 工作机制
 
 **弹窗存活（两段式）**：默认存活 **1 分钟**；到点时检测系统空闲——你仍在操作本机则**延长到 10 分钟**，已离开则推手机 + 返回 `__FALLBACK__`。
@@ -109,6 +123,10 @@ brew install terminal-notifier
 > ⚠️ `smart_switch` 是 **app 级**判断，分不清同一 app 的不同窗口/项目（开两个 iTerm 看着别的项目时仍判「在看 Claude」而不弹、漏看，靠超时推手机兜底）。**多窗口/多项目并行建议保持默认（始终弹）**。窗口级检测因 hook 无 tty + macOS 多窗口 API 不可靠，未做。
 
 **多个问题**：依次弹多个 `ask_dialog`（一个接一个）。⚠️ macOS 限制：hook 进程无 tty、AppleScriptObjC 的 `NSAlert` 从命令行 osascript 跑 GUI 窗不显示，故**无法做「一屏多字段表单」**；真要多字段需装第三方（如 SwiftDialog）。
+
+**工具常驻（`alwaysLoad: true`）**：`.mcp.json` 给 ask-dialog 设了 `alwaysLoad: true`，让 `ask_dialog` 在**会话启动即载入上下文**。否则 Claude Code 默认把 MCP 工具**延迟加载**（tool-search）——模型得先调 `ToolSearch` 才能用，**新会话常出现「该弹窗却没弹」**。需 **Claude Code ≥ 2.1.121**。
+
+> ⚠️ 这是写死的原生布尔，**无法做成 userConfig 可选开关**：Claude Code 用 zod 严格校验布尔 + `=== true` 比较，`${user_config.*}` 插值出的是字符串（`"true"`/`"false"` 都不等于 `true`、还可能让整个 server 配置解析失败），且没有「保留 server 但取消常驻」的 per-server 设置。**不想要弹窗 / 想省 context** → `/plugin disable claude-notify@dax-tools` 整体停用即可。
 
 ## 组件
 | 文件 | 作用 |

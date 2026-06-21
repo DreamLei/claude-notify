@@ -34,9 +34,10 @@ function userIdleSec() {
 function runOsaTimed(script, sec) {
   return execFileSync('osascript', ['-e', script], { encoding: 'utf8', env: ENV, timeout: sec * 1000 });
 }
-// 立即推手机（不阻塞）；通知总开关关闭则不推
+// 立即推手机（不阻塞）；通知总开关关闭、或企业微信推送被单独关闭则不推
 function pushNow(title, body) {
   if (/^(false|0|off|no)$/i.test(process.env.NOTIFY_ENABLED || '')) return;
+  if (/^(false|0|off|no)$/i.test(process.env.WECHAT_PUSH_ENABLED || '')) return;
   try { spawn('bash', [NOTIFY_SH, title, body], { detached: true, stdio: 'ignore' }).unref(); } catch (e) {}
 }
 // 当前前台 app 名（lsappinfo，无需辅助功能权限）；用于判断用户是否正看终端
