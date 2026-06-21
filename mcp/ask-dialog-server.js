@@ -39,11 +39,24 @@ function pushNow(title, body) {
   if (/^(false|0|off|no)$/i.test(process.env.NOTIFY_ENABLED || '')) return;
   try { spawn('bash', [NOTIFY_SH, title, body], { detached: true, stdio: 'ignore' }).unref(); } catch (e) {}
 }
+// 当前前台 app 名（lsappinfo，无需辅助功能权限）；用于判断用户是否正看终端
+function frontApp() {
+  try {
+    const out = execFileSync('sh', ['-c', 'lsappinfo info -only name "$(lsappinfo front)"'], { encoding: 'utf8', timeout: 2000 });
+    const m = out.match(/"LSDisplayName"="([^"]*)"/);
+    return m ? m[1] : '';
+  } catch (e) { return ''; }
+}
+function inTerminal() {
+  return /iterm|terminal|ghostty|wezterm|warp|alacritty|kitty|hyper|tabby/i.test(frontApp());
+}
 
 const FALLBACK = '__FALLBACK__：用户取消 / 超时 / 弹窗不可用。请改用内置 AskUserQuestion 在终端继续提问（终端交互始终保留为后备）。';
 const FALLBACK_NONE = '__FALLBACK__：用户选择了「以上都不对 / 我要补充」。给出的选项均不符合用户意图，请改用内置 AskUserQuestion 在终端继续追问、澄清真实需求（不要重复同一批选项）。';
+const FALLBACK_TERM = '__FALLBACK__：用户当前正看着终端，直接用内置 AskUserQuestion 在终端提问即可，无需弹桌面窗。';
 
 function askDialog(args) {
+  if (inTerminal()) return FALLBACK_TERM;   // 用户正看终端 → 不弹窗，回退终端提问
   const question = args.question || '请选择';
   const options = Array.isArray(args.options) ? args.options : [];
   const multiple = !!args.multiple;
