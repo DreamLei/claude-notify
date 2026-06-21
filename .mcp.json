@@ -6,7 +6,8 @@
       "env": {
         "WEBHOOK_URL": "${user_config.webhook_url}",
         "MENTION": "${user_config.mention}",
-        "NOTIFY_ENABLED": "${user_config.enable_notifications}"
+        "NOTIFY_ENABLED": "${user_config.enable_notifications}",
+        "SMART_SWITCH": "${user_config.smart_switch}"
       }
     }
   }

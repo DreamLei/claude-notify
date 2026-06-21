@@ -57,7 +57,8 @@ const FALLBACK_NONE = '__FALLBACK__：用户选择了「以上都不对 / 我要
 const FALLBACK_TERM = '__FALLBACK__：用户当前正看着 Claude 宿主（终端/IDE/桌面 app），直接用内置 AskUserQuestion 提问即可，无需弹桌面窗。';
 
 function askDialog(args) {
-  if (inHostApp()) return FALLBACK_TERM;   // 用户正看着 Claude 宿主(终端/IDE/app) → 不弹窗，回退终端提问
+  // 智能切换（smart_switch，默认关=始终弹浮顶窗最稳妥）：开启且前台是 Claude 宿主时才不弹、回退终端
+  if (/^(1|true|on|yes)$/i.test(process.env.SMART_SWITCH || '') && inHostApp()) return FALLBACK_TERM;
   const question = args.question || '请选择';
   const options = Array.isArray(args.options) ? args.options : [];
   const multiple = !!args.multiple;
