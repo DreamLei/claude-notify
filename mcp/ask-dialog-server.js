@@ -86,23 +86,34 @@ function askDialog(args) {
   }
 
   chime();
+  let result;
   try {
-    return parse(runOsaTimed(makeScript(), SHORT));        // 第一段：存活 SHORT 秒
+    result = parse(runOsaTimed(makeScript(), SHORT));      // 第一段：存活 SHORT 秒
   } catch (e) {
     if (e && e.status === 1) return FALLBACK;               // display dialog 用户点了取消
-    // 到点仍未处理：若用户仍在操作本机 → 延长 LONG 秒，否则推手机
-    if (userIdleSec() < SHORT) {
-      chime();                                              // 再提醒一次
+    if (userIdleSec() < SHORT) {                            // 用户仍在操作 → 延长
+      chime();
       try {
-        return parse(runOsaTimed(makeScript(), LONG));      // 第二段：延长存活
+        result = parse(runOsaTimed(makeScript(), LONG));    // 第二段：延长存活
       } catch (e2) {
         if (e2 && e2.status === 1) return FALLBACK;
-        // 延长后仍超时 → 落到下面推手机
+        pushNow('⏳ 有事待确认', pushBody);
+        return FALLBACK;
       }
+    } else {
+      pushNow('⏳ 有事待确认', pushBody);                    // 用户离开 → 推手机
+      return FALLBACK;
     }
-    pushNow('⏳ 有事待确认', pushBody);                      // 用户离开 / 延长后仍未处理 → 推手机
-    return FALLBACK;
   }
+  // 选了「以上都不对 / 我要补充」→ 直接弹输入框收集补充，把内容回传，免回终端再问一轮
+  if (result === FALLBACK_NONE) {
+    try {
+      const out = runOsaTimed(`display dialog "请补充说明你的真实需求（直接输入；点取消则回终端继续聊）" default answer "" with title "${esc(title)}" buttons {"取消","提交"} default button "提交" cancel button "取消" with icon note`, LONG);
+      const txt = field(out, 'text returned').trim();
+      return txt ? '用户补充：' + txt : FALLBACK_NONE;       // 有内容→回传；空→回终端
+    } catch (e) { return FALLBACK_NONE; }                    // 取消/超时 → 回终端
+  }
+  return result;
 }
 
 const TOOL = {
