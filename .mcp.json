@@ -10,7 +10,9 @@
         "MENTION": "${user_config.mention}",
         "NOTIFY_ENABLED": "${user_config.enable_notifications}",
         "SMART_SWITCH": "${user_config.smart_switch}",
-        "WECHAT_PUSH_ENABLED": "${user_config.enable_wechat_push}"
+        "WECHAT_PUSH_ENABLED": "${user_config.enable_wechat_push}",
+        "ASK_DIALOG_TIMEOUT_SEC": "${user_config.dialog_timeout_sec}",
+        "ASK_DIALOG_DEFER_MIN": "${user_config.defer_minutes}"
       },
       "alwaysLoad": true
     }

@@ -43,6 +43,18 @@
       "title": "智能切换（看着 Claude 时不弹窗）",
       "description": "默认关=始终弹浮顶窗，多窗口/多项目都看得到、最稳妥。开启后：前台是 Claude 宿主（终端/IDE/桌面 app）时不弹、走终端问答（注意 app 级判断分不清同 app 不同窗口/项目）。",
       "default": false
+    },
+    "dialog_timeout_sec": {
+      "type": "string",
+      "title": "弹窗存活秒数",
+      "description": "提问弹窗固定存活多少秒，到点仍未处理则自动关窗、回退终端。默认 120（2 分钟）。单次调用传 timeout 参数可临时覆盖本值。",
+      "default": "120"
+    },
+    "defer_minutes": {
+      "type": "string",
+      "title": "关闭后延迟推送分钟数",
+      "description": "弹窗超时自动关闭后，再等多少分钟仍没在终端回话才推企业微信（期间堆积的多条问题会合并成一条）。默认 5 分钟。",
+      "default": "5"
     }
   }
 }
