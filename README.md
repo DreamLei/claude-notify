@@ -6,7 +6,7 @@
 - **在电脑、但切到别的窗口** → `ask_dialog` 弹出 macOS 模态窗（浮最上层 + Ping 声），**直接在弹窗里点选/输入，不用切回终端**
 - **离开电脑、超过 5 分钟没处理** → @ 你推**企业微信**，消息里写明要确认什么
 
-> 仅 macOS（弹窗依赖 osascript / terminal-notifier）。
+> 仅 macOS，全部零依赖：弹窗用 osascript、提示音用 afplay、推送用 curl，均系统自带。
 
 ---
 
@@ -21,7 +21,7 @@
 | 「都不对」逃生口 | 每个弹窗自动带「❌ 以上都不对/我要补充」；选中后**直接弹输入框收集补充**，内容回传，免回终端 |
 | 全权限弹窗门（`permission-gate`）| 开关 `enable_permission_gate` 开启后，**非白名单、非危险**的普通命令也弹桌面授权窗（允许/拒绝/总是允许），无需回终端；危险命令交由各自危险护栏 |
 | 终端后备 | 取消/超时/弹窗不可用 → 返回 `__FALLBACK__`，模型自动回退内置终端提问 |
-| 完成/等待通知 | Stop→「✅ 完成」；Notification→「⏳ 等待你」（terminal-notifier 横幅）|
+| 完成/等待提示音 | Stop→完成音(Glass)；Notification→等待音(Ping)。afplay 系统声音，**零依赖**（macOS hook 无 tty/无 app 身份，发不出桌面横幅，故用声音 + 手机推送替代）|
 | 手机推送 | 等待超时 → @你推企业微信，**消息含问题+选项+推荐**；**超时才推**（默认 5 分钟）、**冷却去重**（默认 5 分钟内一条）|
 
 ---
@@ -39,11 +39,8 @@
 claude --plugin-dir /path/to/claude-notify
 ```
 
-### 2. 装依赖（一次）
-```
-brew install terminal-notifier
-```
-（node 一般随 Claude Code 环境已具备；脚本用 `command -v node` 动态查找。）
+### 2. 依赖：无需安装
+通知用系统自带 `afplay`、弹窗用 `osascript`、推送用 `curl`、JSON 用 `node`（随 Claude Code 环境，脚本用 `command -v node` 动态查找）。**不再需要 brew 装任何东西。**
 
 ### 3. 建你自己的企业微信群机器人 ⭐
 **每人配自己的群，`@all` 就只 @ 到自己、互不打扰：**

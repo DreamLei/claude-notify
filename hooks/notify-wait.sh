@@ -13,7 +13,6 @@ else
 fi
 [ -z "$MSG" ] && MSG="需要你确认或选择，请回到终端"
 
-TN=$(command -v terminal-notifier 2>/dev/null)
-[ -n "$TN" ] && "$TN" -title "Claude Code" -subtitle "⏳ 等待你" -message "$MSG" -sound Ping 2>/dev/null || true
+afplay /System/Library/Sounds/Ping.aiff 2>/dev/null || true   # 等待提示音（零依赖）
 bash "$DIR/notify-push.sh" "⏳ 等待你" "$MSG" 2>/dev/null || true
 exit 0
