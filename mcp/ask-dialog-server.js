@@ -11,6 +11,8 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const NOTIFY_SH = path.join(__dirname, '..', 'hooks', 'notify-push.sh'); // 同包脚本，免硬编码
+const ICON_PNG = path.join(__dirname, '..', 'assets', 'cc-icon.png');   // Claude Code logo（JXA NSAlert 用 PNG）
+const ICON_ICNS = path.join(__dirname, '..', 'assets', 'cc-icon.icns'); // 同一 logo 的 icns（AppleScript display dialog 偏好 icns）
 // 弹窗活跃锁：提问框存活期间写本文件，notify-wait.sh 检测到即跳过「⏳ 等待你」横幅，避免双弹。
 const LOCK_PATH = path.join(os.homedir(), '.claude', '.ask-dialog-active');
 function writeLock() { try { fs.writeFileSync(LOCK_PATH, String(Math.floor(Date.now() / 1000))); } catch (e) {} }
@@ -73,6 +75,7 @@ function buildChoiceJxa(d) {
     '  view.addSubview(field);',
     '}',
     'var alert = $.NSAlert.alloc.init;',
+    'if (D.iconPath) { var _ic = $.NSImage.alloc.initWithContentsOfFile(D.iconPath); if (_ic && !_ic.isNil()) alert.icon = _ic; }', // Claude Code logo 覆盖默认 osascript 图标
     'alert.messageText = D.title;',
     'alert.informativeText = D.prompt;',
     "alert.addButtonWithTitle('确定');",
@@ -170,7 +173,7 @@ function askDialog(args) {
   // 按形态构造脚本 + 结果解析
   let makeScript, parse, lang = 'as';
   if (allowText) {
-    makeScript = () => `display dialog "${esc(promptFull)}" default answer "${esc(args.default_text || '')}" with title "${esc(title)}" buttons {"取消","确定"} default button "确定" cancel button "取消" with icon note`;
+    makeScript = () => `display dialog "${esc(promptFull)}" default answer "${esc(args.default_text || '')}" with title "${esc(title)}" buttons {"取消","确定"} default button "确定" cancel button "取消" with icon (POSIX file "${esc(ICON_ICNS)}")`;
     parse = (out) => '用户输入：' + field(out, 'text returned');
   } else {
     // 选择题统一走 JXA 原生勾选框：multiple→复选框，否则→radio 单选（自动互斥）。
@@ -184,7 +187,8 @@ function askDialog(args) {
       defaults: def ? [def] : [],
       allowSupp: allowNone,
       otherLabel: '其他：',
-      suppPlaceholder: '输入自定义内容；点「取消」则作为转回会话的说明…'
+      suppPlaceholder: '输入自定义内容；点「取消」则作为转回会话的说明…',
+      iconPath: ICON_PNG
     };
     makeScript = () => buildChoiceJxa(data);
     parse = (out) => {

@@ -20,8 +20,9 @@ ask_dialog_active || sleep 1.2
 ask_dialog_active && exit 0
 
 TN=$(command -v terminal-notifier 2>/dev/null)
+ICON="$(cd "$(dirname "$0")/../assets" 2>/dev/null && pwd)/cc-icon.png"   # Claude Code logo（自包含于本插件 assets/）
 if [ -n "$TN" ]; then
-  "$TN" -title "Claude Code" -subtitle "⏳ 等待你" -message "$MSG" -sound Ping 2>/dev/null || true
+  "$TN" -title "Claude Code" -subtitle "⏳ 等待你" -message "$MSG" -sound Ping -appIcon "$ICON" -contentImage "$ICON" 2>/dev/null || true
 else
   afplay /System/Library/Sounds/Ping.aiff 2>/dev/null || true
 fi
