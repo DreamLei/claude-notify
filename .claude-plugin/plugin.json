@@ -19,6 +19,12 @@
       "title": "@ 对象",
       "description": "通知里 @ 谁：@all（在自己群里即 @ 本人）或手机号（逗号分隔多个）",
       "default": "@all"
+    },
+    "enable_permission_gate": {
+      "type": "boolean",
+      "title": "全权限弹窗门",
+      "description": "开启后，非白名单、非危险的普通命令也弹桌面授权窗（允许/拒绝/总是允许），无需切回终端；关闭则走 Claude Code 正常权限流程。危险命令仍由各自的危险护栏处理。",
+      "default": false
     }
   }
 }
