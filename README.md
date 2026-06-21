@@ -75,6 +75,7 @@ brew install terminal-notifier
 | `webhook_url` | 必填（sensitive）| 企业微信群机器人 webhook，存系统钥匙串、不进 git |
 | `mention` | `@all` | 通知 @ 对象（`@all` 或手机号）|
 | `enable_permission_gate` | `false` | 开启「全权限弹窗门」：非白名单/非危险命令也弹桌面授权 |
+| `enable_notifications` | `true` | 通知提醒总开关：关闭后不发「完成/等待」通知与企业微信推送（弹窗提问/授权仍工作）|
 
 ### 本地文件 `~/.claude/.notify-webhook`（userConfig 未设时回退）
 ```
