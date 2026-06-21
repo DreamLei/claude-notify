@@ -2,12 +2,13 @@
 'use strict';
 // 桌面弹窗提问 MCP server（零依赖，stdio + newline-delimited JSON-RPC）。
 // 工具 ask_dialog：弹 macOS 原生窗让用户选择/输入，结果直接回传给模型，无需切回终端。
-// 取消/超时/弹窗不可用 → 返回以 __FALLBACK__ 开头的文本，模型据此回退到内置终端提问。
+// 窗口默认存活 1 分钟；到点时若用户仍在操作本机（系统未空闲）则延长到 10 分钟，
+// 否则推手机 + 返回 __FALLBACK__（模型据此回退到内置终端提问）。
 
 const readline = require('readline');
 const { execFileSync, spawn } = require('child_process');
 const path = require('path');
-const NOTIFY_SH = path.join(__dirname, '..', 'hooks', 'notify-push.sh'); // plugin 内脚本，免硬编码
+const NOTIFY_SH = path.join(__dirname, '..', 'hooks', 'notify-push.sh'); // 同包脚本，免硬编码
 
 const ENV = { ...process.env, LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' }; // 强制 UTF-8 防中文乱码
 
@@ -19,25 +20,23 @@ function field(text, prop) {
   const m = text.match(new RegExp(prop + ':([\\s\\S]*?)(?:, [a-z ]+returned:|, gave up:|$)'));
   return m ? m[1].replace(/\s+$/, '') : '';
 }
-
 function chime() {
   try { spawn('afplay', ['/System/Library/Sounds/Ping.aiff'], { detached: true, stdio: 'ignore' }).unref(); } catch (e) {}
 }
-function runOsa(script) { return execFileSync('osascript', ['-e', script], { encoding: 'utf8', env: ENV }); }
-
-// 延时手机推送：弹窗后起一个 sleep N 的子进程，超时未处理才发；用户一处理就 cancelPush() 杀掉它
-let pushProc = null;
-function schedulePush(afterSec, title, body) {
+// 系统空闲秒数（HID 键鼠空闲）；查不到当作 0 = 用户在操作（保守倾向延长，不轻易放弃）
+function userIdleSec() {
   try {
-    pushProc = spawn('bash', ['-c', 'sleep "$1"; exec bash "$2" "$3" "$4"', 'sh', String(afterSec), NOTIFY_SH, title, body], { detached: true, stdio: 'ignore' });
-    pushProc.unref();
-  } catch (e) { pushProc = null; }
+    const out = execFileSync('sh', ['-c', "ioreg -c IOHIDSystem | awk '/HIDIdleTime/{print int($NF/1000000000); exit}'"], { encoding: 'utf8', timeout: 3000 });
+    return parseInt(out.trim(), 10) || 0;
+  } catch (e) { return 0; }
 }
-function cancelPush() {
-  if (!pushProc) return;
-  try { process.kill(-pushProc.pid); } catch (e) {} // 杀整个进程组（含 sleep）
-  try { pushProc.kill(); } catch (e) {}
-  pushProc = null;
+// 跑 osascript，最多等 sec 秒（到点 kill 进程关窗）。正常返回 stdout；超时或用户取消则抛错。
+function runOsaTimed(script, sec) {
+  return execFileSync('osascript', ['-e', script], { encoding: 'utf8', env: ENV, timeout: sec * 1000 });
+}
+// 立即推手机（不阻塞）
+function pushNow(title, body) {
+  try { spawn('bash', [NOTIFY_SH, title, body], { detached: true, stdio: 'ignore' }).unref(); } catch (e) {}
 }
 
 const FALLBACK = '__FALLBACK__：用户取消 / 超时 / 弹窗不可用。请改用内置 AskUserQuestion 在终端继续提问（终端交互始终保留为后备）。';
@@ -48,59 +47,67 @@ function askDialog(args) {
   const options = Array.isArray(args.options) ? args.options : [];
   const multiple = !!args.multiple;
   const allowText = !!args.allow_text || options.length === 0;
-  const timeout = Number(args.timeout) || 600;
+  const SHORT = Number(args.timeout) || 60;            // 初始存活：默认 1 分钟
+  const LONG = Number(args.timeout_extended) || 600;   // 用户仍在操作则延长到：默认 10 分钟
   const title = args.title || 'Claude 需要你决定';
-  const rec = options.find(o => o && o.recommended);          // AI 推荐项
-  const def = args.default_label || (rec ? rec.label : '');   // 推荐项默认高亮/预选
+  const rec = options.find(o => o && o.recommended);
+  const def = args.default_label || (rec ? rec.label : '');
   const NONE = '❌ 以上都不对 / 我要补充（转终端）';
-  const allowNone = args.allow_none !== false;                // 默认附加「都不对」逃生口
+  const allowNone = args.allow_none !== false;
 
-  chime();
-  const pushAfter = (() => { const p = Number(args.push_after) || 300; return p >= timeout ? Math.max(5, Math.floor(timeout * 0.6)) : p; })();
-  let pushBody = question; // 手机推送带上完整待确认内容（问题 + 选项 + 推荐）
+  // 手机推送内容：问题 + 选项 + 推荐
+  let pushBody = question;
   if (options.length) pushBody += '\n\n选项：' + options.map((o, i) => `\n${i + 1}. ${o.label}${o.recommended ? '（AI推荐）' : ''}${o.description ? ' — ' + o.description : ''}`).join('');
   else if (allowText) pushBody += '\n\n（需要你输入文本回答）';
-  schedulePush(pushAfter, '⏳ 有事待确认', pushBody); // 超过 pushAfter 秒仍未处理才推手机
+
   const descLines = options.filter(o => o && o.description).map(o => `• ${o.label}${o.recommended ? '（AI 推荐）' : ''}：${o.description}`);
   let promptFull = descLines.length ? `${question}\n\n${descLines.join('\n')}` : question;
   if (rec) promptFull = `💡 AI 推荐：${rec.label}${rec.description ? '（' + rec.description + '）' : ''}\n\n${promptFull}`;
 
-  try {
-    if (allowText) {
-      const script = `display dialog "${esc(promptFull)}" default answer "${esc(args.default_text || '')}" with title "${esc(title)}" buttons {"取消","确定"} default button "确定" cancel button "取消" with icon note giving up after ${timeout}`;
-      const out = runOsa(script);
-      if (/gave up:true/.test(out)) return FALLBACK;
-      return '用户输入：' + field(out, 'text returned');
-    }
+  // 按形态构造脚本 + 结果解析
+  let makeScript, parse;
+  if (allowText) {
+    makeScript = () => `display dialog "${esc(promptFull)}" default answer "${esc(args.default_text || '')}" with title "${esc(title)}" buttons {"取消","确定"} default button "确定" cancel button "取消" with icon note`;
+    parse = (out) => '用户输入：' + field(out, 'text returned');
+  } else {
     const effOpts = allowNone ? options.concat([{ label: NONE }]) : options.slice();
     if (effOpts.length <= 3 && !multiple) {
       const labels = effOpts.map(o => `"${esc(o.label)}"`).join(',');
       const defBtn = def || (options.length ? options[options.length - 1].label : NONE);
-      const script = `display dialog "${esc(promptFull)}" with title "${esc(title)}" buttons {${labels}} default button "${esc(defBtn)}" with icon note giving up after ${timeout}`;
-      const out = runOsa(script);
-      if (/gave up:true/.test(out)) return FALLBACK;
-      const picked = field(out, 'button returned');
-      if (picked === NONE) return FALLBACK_NONE;
-      return '用户选择：' + picked;
+      makeScript = () => `display dialog "${esc(promptFull)}" with title "${esc(title)}" buttons {${labels}} default button "${esc(defBtn)}" with icon note`;
+      parse = (out) => { const p = field(out, 'button returned'); return p === NONE ? FALLBACK_NONE : '用户选择：' + p; };
+    } else {
+      const labels = effOpts.map(o => `"${esc(o.label)}"`).join(',');
+      const multiClause = multiple ? ' with multiple selections allowed' : '';
+      const defClause = def ? ` default items {"${esc(def)}"}` : '';
+      makeScript = () => `choose from list {${labels}} with title "${esc(title)}" with prompt "${esc(promptFull)}"${multiClause}${defClause}`;
+      parse = (out) => { out = out.trim(); if (out === 'false' || out === '') return FALLBACK; if (out.split(', ').indexOf(NONE) !== -1) return FALLBACK_NONE; return '用户选择：' + out; };
     }
-    const labels = effOpts.map(o => `"${esc(o.label)}"`).join(',');
-    const multiClause = multiple ? ' with multiple selections allowed' : '';
-    const defClause = def ? ` default items {"${esc(def)}"}` : '';
-    const script = `choose from list {${labels}} with title "${esc(title)}" with prompt "${esc(promptFull)}"${multiClause}${defClause}`;
-    const out = runOsa(script).trim();
-    if (out === 'false' || out === '') return FALLBACK; // 用户点了取消
-    if (out.split(', ').indexOf(NONE) !== -1) return FALLBACK_NONE; // 选了「都不对」（含多选）
-    return '用户选择：' + out;
+  }
+
+  chime();
+  try {
+    return parse(runOsaTimed(makeScript(), SHORT));        // 第一段：存活 SHORT 秒
   } catch (e) {
-    return FALLBACK; // osascript 失败 / cancel button 抛错 / 无 GUI
-  } finally {
-    cancelPush(); // 用户已处理（点了 / 取消 / 超时返回）→ 取消待发的手机推送
+    if (e && e.status === 1) return FALLBACK;               // display dialog 用户点了取消
+    // 到点仍未处理：若用户仍在操作本机 → 延长 LONG 秒，否则推手机
+    if (userIdleSec() < SHORT) {
+      chime();                                              // 再提醒一次
+      try {
+        return parse(runOsaTimed(makeScript(), LONG));      // 第二段：延长存活
+      } catch (e2) {
+        if (e2 && e2.status === 1) return FALLBACK;
+        // 延长后仍超时 → 落到下面推手机
+      }
+    }
+    pushNow('⏳ 有事待确认', pushBody);                      // 用户离开 / 延长后仍未处理 → 推手机
+    return FALLBACK;
   }
 }
 
 const TOOL = {
   name: 'ask_dialog',
-  description: '弹 macOS 桌面弹窗向用户选择/确认/输入，结果直接返回，使用户无需切回终端。用于方案选择、确认、自由文本回答。返回文本以 __FALLBACK__ 开头时表示用户取消/超时/弹窗不可用，应改用内置终端提问。',
+  description: '弹 macOS 桌面弹窗向用户选择/确认/输入，结果直接返回，使用户无需切回终端。用于方案选择、确认、自由文本回答。窗口默认存活 1 分钟，到点时若用户仍在操作本机则延长到 10 分钟。返回文本以 __FALLBACK__ 开头时表示用户取消/超时/弹窗不可用，应改用内置终端提问。',
   inputSchema: {
     type: 'object',
     properties: {
@@ -112,8 +119,8 @@ const TOOL = {
       default_label: { type: 'string', description: '默认选中/默认按钮的 label' },
       allow_none: { type: 'boolean', description: '是否附加「以上都不对/我要补充」逃生口，默认 true；选中即返回 __FALLBACK__ 回退终端追问' },
       title: { type: 'string', description: '弹窗标题' },
-      timeout: { type: 'number', description: '弹窗存活秒数，默认600（10分钟，留足时间让用户回来点）' },
-      push_after: { type: 'number', description: '超过该秒数仍未处理才推手机，默认300（5分钟）；用户一处理即取消推送' }
+      timeout: { type: 'number', description: '弹窗初始存活秒数，默认60（1分钟）' },
+      timeout_extended: { type: 'number', description: '到点时若用户仍在操作本机则延长到的存活秒数，默认600（10分钟）；延长后仍未处理才推手机' }
     },
     required: ['question']
   }
