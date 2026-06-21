@@ -1,0 +1,8 @@
+# 把本文件复制为 ~/.claude/.notify-webhook 后填入你自己的企业微信群机器人信息。
+#   cp .notify-webhook.example ~/.claude/.notify-webhook && chmod 600 ~/.claude/.notify-webhook
+# 然后把下面两行改成你自己的（删掉本说明无所谓，脚本只取以 http 开头的行和含 @all/手机号的行）。
+#
+# 第一行：你自己群机器人的 webhook URL（企业微信群 → 群机器人 → 添加 → 复制 Webhook 地址）
+https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=替换成你自己的KEY
+# 第二行(可选)：@all（在你自己的群里就是 @你本人）；或填你的手机号，逗号分隔可多个
+@all

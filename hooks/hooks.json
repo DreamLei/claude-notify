@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/hooks/notify-done.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "WEBHOOK_URL=\"${user_config.webhook_url}\" MENTION=\"${user_config.mention}\" \"${CLAUDE_PLUGIN_ROOT}\"/hooks/notify-wait.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

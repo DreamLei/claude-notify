@@ -1,0 +1,22 @@
+{
+  "name": "claude-notify",
+  "description": "桌面弹窗提问 + 完成/等待通知 + 企业微信手机推送。Claude 卡住需要你时一定能通知到：在电脑别的窗口→模态弹窗就地处理；离开电脑超时未处理→@你推企业微信（冷却去重）。",
+  "author": {
+    "name": "thomas.tang"
+  },
+  "userConfig": {
+    "webhook_url": {
+      "type": "string",
+      "title": "企业微信群机器人 Webhook",
+      "description": "你自己的企业微信群机器人 Webhook 地址（企业微信建群→群设置→群机器人→添加→复制 Webhook 地址）。每人用自己的群，@all 即只@本人。",
+      "required": true,
+      "sensitive": true
+    },
+    "mention": {
+      "type": "string",
+      "title": "@ 对象",
+      "description": "通知里 @ 谁：@all（在自己群里即 @ 本人）或手机号（逗号分隔多个）",
+      "default": "@all"
+    }
+  }
+}

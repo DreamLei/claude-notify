@@ -1,0 +1,5 @@
+# 本地配置含密钥/手机号，绝不入库（每人本地填）
+.notify-webhook
+.notify-last
+.DS_Store
+.idea/

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "ask-dialog": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/ask-dialog-server.js"],
+      "env": {
+        "WEBHOOK_URL": "${user_config.webhook_url}",
+        "MENTION": "${user_config.mention}"
+      }
+    }
+  }
+}
