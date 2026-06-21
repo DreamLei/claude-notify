@@ -4,6 +4,8 @@
   "author": {
     "name": "thomas.tang"
   },
+  "homepage": "https://gitlab.zenlayer.net/dax/claude-notify",
+  "repository": "git@gitlab.zenlayer.net:dax/claude-notify.git",
   "userConfig": {
     "webhook_url": {
       "type": "string",

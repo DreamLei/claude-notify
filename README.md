@@ -28,8 +28,8 @@
 ### 1. 装 plugin
 团队 marketplace 方式（推荐）：
 ```
-/plugin marketplace add <你们组织/claude-notify 仓库>
-/plugin install claude-notify@<marketplace 名>
+/plugin marketplace add git@gitlab.zenlayer.net:dax/claude-notify.git
+/plugin install claude-notify@dax-tools
 ```
 本地开发/试用：
 ```
