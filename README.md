@@ -4,7 +4,7 @@
 
 - **在终端** → 直接看到提问
 - **在电脑、但切到别的窗口** → `ask_dialog` 弹出 macOS 模态窗（浮最上层 + Ping 声），**直接在弹窗里点选/输入，不用切回终端**
-- **离开电脑、超过 5 分钟没处理** → @ 你推**企业微信**，消息里写明要确认什么
+- **离开电脑、没回来处理** → 弹窗到点先关窗、回退终端；关窗后再延迟一会儿（默认 5 分钟）你仍没在终端回话，才 @ 你推**企业微信**（期间堆积的多条问题合并成一条），消息里写明要确认什么
 
 > 仅 macOS。核心零依赖（osascript / afplay / curl / node 均系统自带）；**可选**装 terminal-notifier 让「完成/等待」走桌面横幅，未装则自动回退 afplay 提示音。
 
@@ -16,13 +16,13 @@
 |---|---|
 | 桌面弹窗提问（MCP `ask_dialog`）| 选项→按钮/列表、确认→二选一、文本→输入框；结果直接回传，无需回终端 |
 | 智能切换（`smart_switch`，**默认关**）| 默认**始终弹浮顶窗**（多窗口/多项目都看得到，最稳）；开启后看着 Claude 宿主(终端/IDE/app)就不弹、走终端。app 级，分不清同 app 多窗口（见工作机制）|
-| 窗口存活策略 | 默认存活 **1 分钟**；到点时你仍在操作本机则自动**延长到 10 分钟**，否则推手机 |
+| 窗口存活策略 | 单窗固定存活 **2 分钟**（可配 `dialog_timeout_sec`）；到点未处理则关窗、返回 `__FALLBACK__` 回退终端，并进入**延迟合并推送**（见下）|
 | AI 推荐项 | 选项标 `recommended` → 自动高亮/预选 + 顶部「💡 AI 推荐」 |
 | 「都不对」逃生口 | 每个弹窗自动带「❌ 以上都不对/我要补充」；选中后**直接弹输入框收集补充**，内容回传，免回终端 |
 | 全权限弹窗门（`permission-gate`）| 开关 `enable_permission_gate` 开启后，**非白名单、非危险**的普通命令也弹桌面授权窗（允许/拒绝/总是允许），无需回终端；危险命令交由各自危险护栏 |
 | 终端后备 | 取消/超时/弹窗不可用 → 返回 `__FALLBACK__`，模型自动回退内置终端提问 |
 | 完成/等待通知 | Stop→「✅完成」、Notification→「⏳等待你」。装 terminal-notifier→桌面横幅；未装→afplay 提示音（hook 无 tty/无 app 身份发不出系统横幅，故备选声音）。Notification **只通知、不推手机** |
-| 手机推送 | **仅** `ask_dialog` 弹窗「超时未处理」才 @你推企业微信（**不是每次等待都推**，避免轰炸）；消息含问题+选项+推荐；冷却去重 5 分钟一条 |
+| 手机推送（延迟合并）| `ask_dialog` 弹窗超时关闭后**不立即推**：再等 `defer_minutes`（默认 5 分钟），期间你在终端回过话则**整窗免推**，否则把堆积的多条问题**合并成一条** @你推；权限申请窗（`permission-gate`）超时则即时推一条。消息含问题+选项+推荐；`notify-push.sh` 另有 5 分钟冷却去重 |
 
 ---
 
@@ -79,6 +79,8 @@ brew install terminal-notifier
 | `enable_notifications` | `true` | 通知提醒总开关：关闭后不发「完成/等待」通知与企业微信推送（弹窗提问/授权仍工作）|
 | `enable_wechat_push` | `true` | 企业微信手机推送独立开关：关闭后「超时未处理」不再 @你推企业微信，但本机桌面弹窗/横幅照常（比 `enable_notifications` 总开关更细：留本机通知、只去手机推送）|
 | `smart_switch` | `false` | 默认关=**始终弹浮顶窗**（多窗口最稳）；开启后看着 Claude 宿主(终端/IDE/app)就不弹、走终端 |
+| `dialog_timeout_sec` | `120` | `ask_dialog` 弹窗固定存活秒数（到点关窗回退终端）；单次调用传 `timeout` 可临时覆盖 |
+| `defer_minutes` | `5` | 弹窗超时关闭后，再等多少分钟仍没在终端回话才推企业微信（期间多条问题合并成一条）|
 
 ### 本地文件 `~/.claude/.notify-webhook`（userConfig 未设时回退）
 ```
@@ -93,7 +95,7 @@ brew install terminal-notifier
 | `NOTIFY_COOLDOWN` | 300 | 推送冷却秒数（去重窗口）|
 | `NOTIFY_DRYRUN=1` | — | 只打印 payload 不发送（调试）|
 
-`ask_dialog` 参数：`timeout`（初始存活秒数，默认 60）、`timeout_extended`（延长存活，默认 600）、`allow_none`（逃生口，默认开）、选项 `recommended`（标 AI 推荐）等。
+`ask_dialog` 参数：`timeout`（本次弹窗存活秒数，不传则用 `dialog_timeout_sec`，默认 120）、`allow_none`（逃生口，默认开）、`multiple`/`allow_text`/`default_label` 等、选项 `recommended`（标 AI 推荐）。延迟推送时长由 `defer_minutes`（或环境变量 `ASK_DIALOG_DEFER_MIN`、测试用 `ASK_DIALOG_DEFER_MS` 毫秒）控制。
 
 ---
 
@@ -112,11 +114,11 @@ brew install terminal-notifier
 
 ## 工作机制
 
-**弹窗存活（两段式）**：默认存活 **1 分钟**；到点时检测系统空闲——你仍在操作本机则**延长到 10 分钟**，已离开则推手机 + 返回 `__FALLBACK__`。
+**弹窗存活（固定单段）**：单窗固定存活 **2 分钟**（`dialog_timeout_sec` 可配，单次 `timeout` 入参可覆盖）；到点 osascript 被 kill 关窗，返回 `__FALLBACK__` 回退终端，并交给下方「延迟合并推送」判定是否推手机。
 
-**超时才推 + 冷却去重**：只有离开/超时未处理才推企业微信，消息含问题+选项+推荐；`notify-push.sh` 用时间戳做 5 分钟冷却，避免重复轰炸。
+**延迟合并推送**：弹窗超时关窗后**不立即推**，把问题攒进队列、自首条起 +`defer_minutes`（默认 5 分钟）统一判定——这期间你在终端提交过输入（`UserPromptSubmit` hook 经 `mark-activity.sh` 刷新 `~/.claude/.last-user-prompt`）即视为已回来答话、**整窗免推**；否则 1 条单推、多条**合并成一条**。`notify-push.sh` 另用时间戳做 5 分钟冷却去重。权限申请窗超时则即时推一条「⏳ 权限申请待确认」。
 
-**权限门**（`enable_permission_gate` 开）：PreToolUse 拦 Bash——白名单放行、危险命令避让（交危险护栏）、其余弹桌面授权窗（允许/拒绝/总是允许，「总是允许」自动养肥白名单）。
+**权限门**（`enable_permission_gate` 开，依赖 `jq`）：PreToolUse 拦 Bash——**危险命令先判**（命中即避让给危险护栏，不被白名单遮蔽）、白名单放行、其余弹桌面授权窗（拒绝/允许/总是允许，默认高亮「允许」，「总是允许」自动养肥白名单 `Bash(首词 *)`）。窗口默认存活 60 秒（`PGATE_TIMEOUT` 可配），**超时自动关 → 推手机 + 回终端**，点「拒绝」才 deny；缺 `jq` 时告警放行而非静默吞。
 
 **智能切换**（`smart_switch`，**默认关**）：默认**始终弹**浮顶窗——不管开几个窗口/项目都看得到，最稳妥。**开启后**才用 `lsappinfo` 看前台是 Claude 宿主（各种终端 / VS Code（含 Cursor）/ JetBrains 全家 / Claude 桌面 app）则不弹、走终端问答。
 
@@ -131,11 +133,12 @@ brew install terminal-notifier
 ## 组件
 | 文件 | 作用 |
 |---|---|
-| `mcp/ask-dialog-server.js` | `ask_dialog` MCP server（弹窗提问 / 智能切换 / 超时推送）|
+| `mcp/ask-dialog-server.js` | `ask_dialog` MCP server（弹窗提问 / 智能切换 / 延迟合并推送）|
 | `hooks/permission-gate.sh` | 全权限弹窗门（PreToolUse/Bash）|
 | `hooks/notify-done.sh` | 完成通知（Stop）|
 | `hooks/notify-wait.sh` | 等待通知（Notification，不推手机）|
 | `hooks/notify-push.sh` | 企业微信推送（冷却去重 + @）|
+| `hooks/mark-activity.sh` | 记录终端最近活动时间戳（UserPromptSubmit→`.last-user-prompt`），供延迟推送判定「是否已回终端答话」|
 | `commands/notify-setup.md` | `/notify-setup` 配置向导 |
 | `.mcp.json` / `hooks/hooks.json` / `.claude-plugin/plugin.json` | MCP / hooks / manifest+userConfig |
 
