@@ -103,6 +103,22 @@ brew install terminal-notifier
 
 **权限门**（`enable_permission_gate` 开）：PreToolUse 拦 Bash——白名单放行、危险命令避让（交危险护栏）、其余弹桌面授权窗（允许/拒绝/总是允许，「总是允许」自动养肥白名单）。
 
+**智能切换**：`ask_dialog` 调用时用 `lsappinfo` 看前台 app——是终端（iTerm 等）就直接回退终端问答、不弹窗；前台是别的 app 才弹桌面窗。所以你盯着终端时不会被弹窗打扰。
+
+**多个问题**：依次弹多个 `ask_dialog`（一个接一个）。⚠️ macOS 限制：hook 进程无 tty、AppleScriptObjC 的 `NSAlert` 从命令行 osascript 跑 GUI 窗不显示，故**无法做「一屏多字段表单」**；真要多字段需装第三方（如 SwiftDialog）。
+
+## 组件
+| 文件 | 作用 |
+|---|---|
+| `mcp/ask-dialog-server.js` | `ask_dialog` MCP server（弹窗提问 / 智能切换 / 超时推送）|
+| `hooks/permission-gate.sh` | 全权限弹窗门（PreToolUse/Bash）|
+| `hooks/notify-done.sh` | 完成通知（Stop）|
+| `hooks/notify-wait.sh` | 等待通知（Notification，不推手机）|
+| `hooks/notify-push.sh` | 企业微信推送（冷却去重 + @）|
+| `commands/notify-setup.md` | `/notify-setup` 配置向导 |
+| `.mcp.json` / `hooks/hooks.json` / `.claude-plugin/plugin.json` | MCP / hooks / manifest+userConfig |
+
 ## 安全
-- webhook key、手机号只在本地 `~/.claude/.notify-webhook`（权限 600），**不随 plugin/git 分发**（仓库只含 `.example` 模板）
+- webhook key、手机号只在本地 `~/.claude/.notify-webhook`（权限 600）或系统钥匙串（userConfig sensitive），**不随 plugin/git 分发**（仓库只含 `.example` 模板）
 - AppleScript 经 `esc()` 转义、JSON 经 `JSON.stringify`，防注入
+- 危险命令（DROP/TRUNCATE/rm -r/生产库写/git force 等）由 db-guard 红窗确认；权限门避让危险命令不重复弹
