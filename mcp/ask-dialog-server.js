@@ -30,8 +30,69 @@ function chime() {
   try { spawn('afplay', ['/System/Library/Sounds/Ping.aiff'], { detached: true, stdio: 'ignore' }).unref(); } catch (e) {}
 }
 // 跑 osascript，最多等 sec 秒（到点 kill 进程关窗）。正常返回 stdout；超时或用户取消则抛错。
-function runOsaTimed(script, sec) {
-  return execFileSync('osascript', ['-e', script], { encoding: 'utf8', env: ENV, timeout: sec * 1000 });
+// lang='js' 走 JavaScript for Automation（JXA），否则默认 AppleScript。
+function runOsaTimed(script, sec, lang) {
+  const cliArgs = lang === 'js' ? ['-l', 'JavaScript', '-e', script] : ['-e', script];
+  return execFileSync('osascript', cliArgs, { encoding: 'utf8', env: ENV, timeout: sec * 1000 });
+}
+
+// 构造 JXA 选择弹窗脚本：真原生勾选框（multiple→复选框 / 否则→radio 自动互斥）。
+// allowSupp 时追加一项「其他：」选项 + 紧邻输入框，与预设选项同组互斥——补充本身即一个选项，
+// 用户选「其他」并填框即可就地回传自定义内容（不回终端）。零外部依赖，仅用 macOS 自带 Cocoa 桥。
+// 入参经 JSON.stringify 注入天然安全转义；回传 JSON {selected:[],other:bool,supplement:""} 或 "__CANCEL__"。
+function buildChoiceJxa(d) {
+  return [
+    "ObjC.import('Cocoa');",
+    'var D = ' + JSON.stringify(d) + ';',
+    'var W = 460, ROW = 26, PAD = 8, FIELDH = 24, OW = 70;',
+    'var n = D.items.length;',
+    'var rows = n + (D.allowSupp ? 1 : 0);',
+    'var H = ROW * rows + PAD * 2;',
+    'var view = $.NSView.alloc.initWithFrame($.NSMakeRect(0, 0, W, H));',
+    'var boxes = [];',
+    'for (var i = 0; i < n; i++) {',
+    '  var lab = D.items[i];',
+    '  var y = H - PAD - ROW * (i + 1);',
+    '  var btn = $.NSButton.alloc.initWithFrame($.NSMakeRect(0, y, W, ROW));',
+    '  btn.setButtonType(D.multiple ? 3 : 4);',
+    "  if (!D.multiple) btn.setAction($.NSSelectorFromString('radioHit:'));",
+    '  btn.title = lab;',
+    '  if (D.defaults.indexOf(lab) !== -1) btn.state = 1;',
+    '  view.addSubview(btn);',
+    '  boxes.push(btn);',
+    '}',
+    'var otherBtn = null, field = null;',
+    'if (D.allowSupp) {',
+    '  otherBtn = $.NSButton.alloc.initWithFrame($.NSMakeRect(0, PAD, OW, ROW));',
+    '  otherBtn.setButtonType(D.multiple ? 3 : 4);',
+    "  if (!D.multiple) otherBtn.setAction($.NSSelectorFromString('radioHit:'));",
+    '  otherBtn.title = D.otherLabel;',
+    '  view.addSubview(otherBtn);',
+    '  field = $.NSTextField.alloc.initWithFrame($.NSMakeRect(OW + 4, PAD + 1, W - OW - 4, FIELDH));',
+    '  field.setPlaceholderString(D.suppPlaceholder);',
+    '  view.addSubview(field);',
+    '}',
+    'var alert = $.NSAlert.alloc.init;',
+    'alert.messageText = D.title;',
+    'alert.informativeText = D.prompt;',
+    "alert.addButtonWithTitle('确定');",
+    "alert.addButtonWithTitle('取消');",
+    'alert.accessoryView = view;',
+    'alert.window.setLevel(3);',
+    'if (field) alert.window.setInitialFirstResponder(field);', // 文本框初始获得键盘焦点
+    '$.NSApp.setActivationPolicy(0);',                           // Regular app → 才能接收键盘输入
+    '$.NSApp.activateIgnoringOtherApps(true);',
+    'var resp = alert.runModal;',
+    "var note = field ? ObjC.unwrap(field.stringValue).trim() : '';", // 框内容（确定/取消都读取）
+    'var out;',
+    "if (resp.toString() === '1000') {",
+    '  var sel = [];',
+    '  for (var j = 0; j < boxes.length; j++) { if (Number(boxes[j].state) > 0) sel.push(ObjC.unwrap(boxes[j].title)); }',
+    '  var other = otherBtn ? (Number(otherBtn.state) > 0) : false;',
+    "  out = JSON.stringify({ action: 'ok', selected: sel, other: other, supplement: note });",
+    "} else { out = JSON.stringify({ action: 'cancel', supplement: note }); }", // 取消也带回框里的说明
+    'out;'
+  ].join('\n');
 }
 // 立即推手机（不阻塞）；通知总开关关闭、或企业微信推送被单独关闭则不推
 function pushNow(title, body) {
@@ -82,7 +143,6 @@ function inHostApp() {
 }
 
 const FALLBACK = '__FALLBACK__：用户取消 / 超时 / 弹窗不可用。请改用内置 AskUserQuestion 在终端继续提问（终端交互始终保留为后备）。';
-const FALLBACK_NONE = '__FALLBACK__：用户选择了「以上都不对 / 我要补充」。给出的选项均不符合用户意图，请改用内置 AskUserQuestion 在终端继续追问、澄清真实需求（不要重复同一批选项）。';
 const FALLBACK_TERM = '__FALLBACK__：用户当前正看着 Claude 宿主（终端/IDE/桌面 app），直接用内置 AskUserQuestion 提问即可，无需弹桌面窗。';
 
 function askDialog(args) {
@@ -96,7 +156,6 @@ function askDialog(args) {
   const title = args.title || 'Claude 需要你决定';
   const rec = options.find(o => o && o.recommended);
   const def = args.default_label || (rec ? rec.label : '');
-  const NONE = '❌ 以上都不对 / 我要补充（转终端）';
   const allowNone = args.allow_none !== false;
 
   // 手机推送内容：问题 + 选项 + 推荐
@@ -109,42 +168,61 @@ function askDialog(args) {
   if (rec) promptFull = `💡 AI 推荐：${rec.label}${rec.description ? '（' + rec.description + '）' : ''}\n\n${promptFull}`;
 
   // 按形态构造脚本 + 结果解析
-  let makeScript, parse;
+  let makeScript, parse, lang = 'as';
   if (allowText) {
     makeScript = () => `display dialog "${esc(promptFull)}" default answer "${esc(args.default_text || '')}" with title "${esc(title)}" buttons {"取消","确定"} default button "确定" cancel button "取消" with icon note`;
     parse = (out) => '用户输入：' + field(out, 'text returned');
   } else {
-    const effOpts = allowNone ? options.concat([{ label: NONE }]) : options.slice();
-    if (effOpts.length <= 3 && !multiple) {
-      const labels = effOpts.map(o => `"${esc(o.label)}"`).join(',');
-      const defBtn = def || (options.length ? options[options.length - 1].label : NONE);
-      makeScript = () => `display dialog "${esc(promptFull)}" with title "${esc(title)}" buttons {${labels}} default button "${esc(defBtn)}" with icon note`;
-      parse = (out) => { const p = field(out, 'button returned'); return p === NONE ? FALLBACK_NONE : '用户选择：' + p; };
-    } else {
-      const labels = effOpts.map(o => `"${esc(o.label)}"`).join(',');
-      const multiClause = multiple ? ' with multiple selections allowed' : '';
-      const defClause = def ? ` default items {"${esc(def)}"}` : '';
-      makeScript = () => `choose from list {${labels}} with title "${esc(title)}" with prompt "${esc(promptFull)}"${multiClause}${defClause}`;
-      parse = (out) => { out = out.trim(); if (out === 'false' || out === '') return FALLBACK; if (out.split(', ').indexOf(NONE) !== -1) return FALLBACK_NONE; return '用户选择：' + out; };
-    }
+    // 选择题统一走 JXA 原生勾选框：multiple→复选框，否则→radio 单选（自动互斥）。
+    // allow_none（默认 true）追加「其他：」选项 + 输入框，与预设同组互斥 → 补充本身即一个选项，就地回传不回终端。
+    lang = 'js';
+    const data = {
+      title,
+      prompt: promptFull,
+      items: options.map(o => o.label),
+      multiple,
+      defaults: def ? [def] : [],
+      allowSupp: allowNone,
+      otherLabel: '其他：',
+      suppPlaceholder: '输入自定义内容；点「取消」则作为转回会话的说明…'
+    };
+    makeScript = () => buildChoiceJxa(data);
+    parse = (out) => {
+      out = (out || '').trim();
+      if (out === '') return FALLBACK;
+      let o;
+      try { o = JSON.parse(out); } catch (e) { return FALLBACK; }
+      if (o.action === 'cancel') {
+        const note = (o.supplement || '').trim();
+        // 取消 = 转回当前会话；框里写了说明就一并带回（仍是 __FALLBACK__，模型据此回终端处理）
+        return note
+          ? '__FALLBACK__：用户取消弹窗、要求转回当前会话处理，附说明：「' + note + '」。请在终端据此继续，不要重复弹窗。'
+          : FALLBACK;
+      }
+      const sel = Array.isArray(o.selected) ? o.selected : [];
+      const supp = o.supplement || '';
+      if (multiple) {
+        const parts = [];
+        if (sel.length) parts.push('用户选择：' + sel.join(', '));
+        if (supp) parts.push('用户补充：' + supp);          // 勾了「其他」或填了框 → 采纳补充
+        return parts.length ? parts.join('；') : FALLBACK;
+      }
+      // 单选：选「其他」用补充；否则用选中的预设项；都没选但填了框也用补充
+      if (o.other) return supp ? '用户补充：' + supp : FALLBACK;
+      if (sel.length) return '用户选择：' + sel[0];
+      if (supp) return '用户补充：' + supp;
+      return FALLBACK;
+    };
   }
 
   chime();
   let result;
   try {
-    result = parse(runOsaTimed(makeScript(), TIMEOUT));      // 单窗固定存活 TIMEOUT 秒（默认 2 分钟），到点 osascript 被 kill 抛错
+    result = parse(runOsaTimed(makeScript(), TIMEOUT, lang)); // 单窗固定存活 TIMEOUT 秒（默认 2 分钟），到点 osascript 被 kill 抛错
   } catch (e) {
     if (e && e.status === 1) return FALLBACK;                // 用户点了取消（人在）→ 不推
     scheduleDeferredPush(pushBody);                          // 自动关闭（人不在）→ 回退终端 + 关后 5 分钟仍没回话才合并推
     return FALLBACK;
-  }
-  // 选了「以上都不对 / 我要补充」→ 直接弹输入框收集补充，把内容回传，免回终端再问一轮
-  if (result === FALLBACK_NONE) {
-    try {
-      const out = runOsaTimed(`display dialog "请补充说明你的真实需求（直接输入；点取消则回终端继续聊）" default answer "" with title "${esc(title)}" buttons {"取消","提交"} default button "提交" cancel button "取消" with icon note`, TIMEOUT);
-      const txt = field(out, 'text returned').trim();
-      return txt ? '用户补充：' + txt : FALLBACK_NONE;       // 有内容→回传；空→回终端
-    } catch (e) { return FALLBACK_NONE; }                    // 取消/超时 → 回终端
   }
   return result;
 }
@@ -157,11 +235,11 @@ const TOOL = {
     properties: {
       question: { type: 'string', description: '要问用户的问题' },
       options: { type: 'array', description: '可选项；每项 {label, description?, recommended?}。recommended:true 标记 AI 推荐项（自动设为默认高亮/预选并在弹窗顶部显示推荐及理由）。省略 options 则弹文本输入框', items: { type: 'object', properties: { label: { type: 'string' }, description: { type: 'string', description: '该选项说明；推荐项的 description 会作为推荐理由显示' }, recommended: { type: 'boolean', description: '是否为 AI 推荐项' } }, required: ['label'] } },
-      multiple: { type: 'boolean', description: '是否允许多选（choose from list）' },
+      multiple: { type: 'boolean', description: '是否允许多选。true=复选框可勾多项；false/省略=radio 单选框（自动互斥）。两种形态都会在末尾附「其他：」选项+输入框' },
       allow_text: { type: 'boolean', description: '是否弹自由文本输入框' },
       default_text: { type: 'string', description: '文本输入框默认值' },
       default_label: { type: 'string', description: '默认选中/默认按钮的 label' },
-      allow_none: { type: 'boolean', description: '是否附加「以上都不对/我要补充」逃生口，默认 true；选中即返回 __FALLBACK__ 回退终端追问' },
+      allow_none: { type: 'boolean', description: '默认 true：在选项末尾附「其他：」选项+输入框（与预设同组互斥），用户可就地输入自定义内容并直接回传（不回终端）；false=不显示该项' },
       title: { type: 'string', description: '弹窗标题' },
       timeout: { type: 'number', description: '本次弹窗存活秒数（不传则用插件配置的默认值，默认120=2分钟）；到点仍未处理则关窗回退终端 + 延迟推手机' }
     },
@@ -196,3 +274,6 @@ rl.on('line', (line) => {
     send({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Method not found: ' + method } });
   }
 });
+
+// 供测试 require（被 node 直接当 MCP server 跑时无副作用）
+module.exports = { askDialog, buildChoiceJxa };
