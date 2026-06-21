@@ -47,16 +47,17 @@ function frontApp() {
     return m ? m[1] : '';
   } catch (e) { return ''; }
 }
-function inTerminal() {
-  return /iterm|terminal|ghostty|wezterm|warp|alacritty|kitty|hyper|tabby/i.test(frontApp());
+// 前台是否为 Claude Code 的宿主（各种终端 / IDE / 桌面 app）——是则用户正看着 Claude，不弹桌面窗
+function inHostApp() {
+  return /iterm|terminal|ghostty|wezterm|warp|alacritty|kitty|hyper|tabby|rio|konsole|wave|jetbrains|intellij|pycharm|webstorm|goland|datagrip|rubymine|phpstorm|clion|rider|android studio|fleet|cursor|\bcode\b|claude/i.test(frontApp());
 }
 
 const FALLBACK = '__FALLBACK__：用户取消 / 超时 / 弹窗不可用。请改用内置 AskUserQuestion 在终端继续提问（终端交互始终保留为后备）。';
 const FALLBACK_NONE = '__FALLBACK__：用户选择了「以上都不对 / 我要补充」。给出的选项均不符合用户意图，请改用内置 AskUserQuestion 在终端继续追问、澄清真实需求（不要重复同一批选项）。';
-const FALLBACK_TERM = '__FALLBACK__：用户当前正看着终端，直接用内置 AskUserQuestion 在终端提问即可，无需弹桌面窗。';
+const FALLBACK_TERM = '__FALLBACK__：用户当前正看着 Claude 宿主（终端/IDE/桌面 app），直接用内置 AskUserQuestion 提问即可，无需弹桌面窗。';
 
 function askDialog(args) {
-  if (inTerminal()) return FALLBACK_TERM;   // 用户正看终端 → 不弹窗，回退终端提问
+  if (inHostApp()) return FALLBACK_TERM;   // 用户正看着 Claude 宿主(终端/IDE/app) → 不弹窗，回退终端提问
   const question = args.question || '请选择';
   const options = Array.isArray(args.options) ? args.options : [];
   const multiple = !!args.multiple;

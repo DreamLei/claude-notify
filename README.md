@@ -15,7 +15,7 @@
 | 能力 | 说明 |
 |---|---|
 | 桌面弹窗提问（MCP `ask_dialog`）| 选项→按钮/列表、确认→二选一、文本→输入框；结果直接回传，无需回终端 |
-| 智能切换 | 你正**看着终端**时不弹窗、直接走终端问答；切到别的 app 才弹桌面窗（`lsappinfo` 检测前台，无需授权）|
+| 智能切换 | 你正**看着 Claude 宿主**（各种终端 / VS Code / JetBrains / Claude 桌面 app）时不弹窗、走终端问答；切到别的 app 才弹（`lsappinfo` 检测前台，无需授权）。⚠️ app 级判断，分不清同 app 多窗口/项目（见工作机制）|
 | 窗口存活策略 | 默认存活 **1 分钟**；到点时你仍在操作本机则自动**延长到 10 分钟**，否则推手机 |
 | AI 推荐项 | 选项标 `recommended` → 自动高亮/预选 + 顶部「💡 AI 推荐」 |
 | 「都不对」逃生口 | 每个弹窗自动带「❌ 以上都不对/我要补充」；选中后**直接弹输入框收集补充**，内容回传，免回终端 |
@@ -103,7 +103,9 @@ brew install terminal-notifier
 
 **权限门**（`enable_permission_gate` 开）：PreToolUse 拦 Bash——白名单放行、危险命令避让（交危险护栏）、其余弹桌面授权窗（允许/拒绝/总是允许，「总是允许」自动养肥白名单）。
 
-**智能切换**：`ask_dialog` 调用时用 `lsappinfo` 看前台 app——是终端（iTerm 等）就直接回退终端问答、不弹窗；前台是别的 app 才弹桌面窗。所以你盯着终端时不会被弹窗打扰。
+**智能切换**：`ask_dialog` 调用时用 `lsappinfo` 看前台 app——是 Claude 宿主（各种终端 / VS Code（含 Cursor）/ JetBrains 全家 / Claude 桌面 app）就回退终端问答、不弹窗；前台是别的 app 才弹桌面窗。
+
+> ⚠️ **局限：app 级，分不清同一 app 的不同窗口/项目**。例如你开两个 iTerm，一个跑 Claude、一个在别的项目，你看着后者时前台仍是 iTerm → 会判「在看 Claude」而不弹，导致漏看。这种情况由 `ask_dialog` **超时 5 分钟推手机**兜底。窗口级精确检测因 hook 进程无 tty + macOS 同 app 多窗口 API 不可靠，**未做**。
 
 **多个问题**：依次弹多个 `ask_dialog`（一个接一个）。⚠️ macOS 限制：hook 进程无 tty、AppleScriptObjC 的 `NSAlert` 从命令行 osascript 跑 GUI 窗不显示，故**无法做「一屏多字段表单」**；真要多字段需装第三方（如 SwiftDialog）。
 
