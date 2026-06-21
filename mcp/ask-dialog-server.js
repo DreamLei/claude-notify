@@ -2,13 +2,19 @@
 'use strict';
 // 桌面弹窗提问 MCP server（零依赖，stdio + newline-delimited JSON-RPC）。
 // 工具 ask_dialog：弹 macOS 原生窗让用户选择/输入，结果直接回传给模型，无需切回终端。
-// 窗口默认存活 1 分钟；到点时若用户仍在操作本机（系统未空闲）则延长到 10 分钟，
-// 否则推手机 + 返回 __FALLBACK__（模型据此回退到内置终端提问）。
+// 窗口固定存活 2 分钟；到点未处理则关窗 + 返回 __FALLBACK__（模型据此回退到内置终端提问）。
+// 关闭后不立刻推手机：再等 5 分钟，期间用户若在终端回过话则免推，否则把堆积的多条问题合并成一条推出去。
 
 const readline = require('readline');
 const { execFileSync, spawn } = require('child_process');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
 const NOTIFY_SH = path.join(__dirname, '..', 'hooks', 'notify-push.sh'); // 同包脚本，免硬编码
+// 弹窗活跃锁：提问框存活期间写本文件，notify-wait.sh 检测到即跳过「⏳ 等待你」横幅，避免双弹。
+const LOCK_PATH = path.join(os.homedir(), '.claude', '.ask-dialog-active');
+function writeLock() { try { fs.writeFileSync(LOCK_PATH, String(Math.floor(Date.now() / 1000))); } catch (e) {} }
+function clearLock() { try { fs.unlinkSync(LOCK_PATH); } catch (e) {} }
 
 const ENV = { ...process.env, LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' }; // 强制 UTF-8 防中文乱码
 
@@ -23,13 +29,6 @@ function field(text, prop) {
 function chime() {
   try { spawn('afplay', ['/System/Library/Sounds/Ping.aiff'], { detached: true, stdio: 'ignore' }).unref(); } catch (e) {}
 }
-// 系统空闲秒数（HID 键鼠空闲）；查不到当作 0 = 用户在操作（保守倾向延长，不轻易放弃）
-function userIdleSec() {
-  try {
-    const out = execFileSync('sh', ['-c', "ioreg -c IOHIDSystem | awk '/HIDIdleTime/{print int($NF/1000000000); exit}'"], { encoding: 'utf8', timeout: 3000 });
-    return parseInt(out.trim(), 10) || 0;
-  } catch (e) { return 0; }
-}
 // 跑 osascript，最多等 sec 秒（到点 kill 进程关窗）。正常返回 stdout；超时或用户取消则抛错。
 function runOsaTimed(script, sec) {
   return execFileSync('osascript', ['-e', script], { encoding: 'utf8', env: ENV, timeout: sec * 1000 });
@@ -39,6 +38,35 @@ function pushNow(title, body) {
   if (/^(false|0|off|no)$/i.test(process.env.NOTIFY_ENABLED || '')) return;
   if (/^(false|0|off|no)$/i.test(process.env.WECHAT_PUSH_ENABLED || '')) return;
   try { spawn('bash', [NOTIFY_SH, title, body], { detached: true, stdio: 'ignore' }).unref(); } catch (e) {}
+}
+
+// —— 延迟合并推送 ——
+// 弹窗超时自动关闭后不立刻推：攒进队列，自首条起 +5 分钟统一判定。
+// 这 5 分钟里用户若在终端提交过输入（UserPromptSubmit hook 刷新 LAST_PROMPT_PATH）= 已回来答话 → 全部免推；
+// 否则把窗口内堆积的多条问题合并成一条企业微信推出去（进程常驻，直接用 in-process 定时器）。
+const LAST_PROMPT_PATH = path.join(os.homedir(), '.claude', '.last-user-prompt');
+// 关闭后延迟时长：优先 ASK_DIALOG_DEFER_MS（毫秒，便于测试细调）→ 其次 ASK_DIALOG_DEFER_MIN（分钟，插件配置注入）→ 默认 5 分钟
+const DEFER_MS = Number(process.env.ASK_DIALOG_DEFER_MS)
+  || (Number(process.env.ASK_DIALOG_DEFER_MIN) ? Number(process.env.ASK_DIALOG_DEFER_MIN) * 60000 : 0)
+  || 5 * 60 * 1000;
+let pending = [];                    // [{ ts(秒), q }]
+let flushTimer = null;
+function nowSec() { return Math.floor(Date.now() / 1000); }
+function readLastPromptSec() {
+  try { return parseInt(fs.readFileSync(LAST_PROMPT_PATH, 'utf8').trim(), 10) || 0; } catch (e) { return 0; }
+}
+function scheduleDeferredPush(question) {
+  pending.push({ ts: nowSec(), q: question });
+  if (!flushTimer) flushTimer = setTimeout(flushPending, DEFER_MS);   // 锚定窗口内第一条，5 分钟后统一 flush
+}
+function flushPending() {
+  flushTimer = null;
+  const items = pending; pending = [];
+  if (!items.length) return;
+  const earliest = items.reduce((m, i) => Math.min(m, i.ts), Infinity);
+  if (readLastPromptSec() > earliest) return;                          // 用户已回来在终端答话 → 整窗免推
+  if (items.length === 1) { pushNow('⏳ 有事待确认', items[0].q); return; }
+  pushNow(`⏳ ${items.length} 条待确认`, items.map((it, i) => `【${i + 1}】${it.q}`).join('\n\n———\n\n'));
 }
 // 当前前台 app 名（lsappinfo，无需辅助功能权限）；用于判断用户是否正看终端
 function frontApp() {
@@ -64,8 +92,7 @@ function askDialog(args) {
   const options = Array.isArray(args.options) ? args.options : [];
   const multiple = !!args.multiple;
   const allowText = !!args.allow_text || options.length === 0;
-  const SHORT = Number(args.timeout) || 60;            // 初始存活：默认 1 分钟
-  const LONG = Number(args.timeout_extended) || 600;   // 用户仍在操作则延长到：默认 10 分钟
+  const TIMEOUT = Number(args.timeout) || Number(process.env.ASK_DIALOG_TIMEOUT_SEC) || 120;  // 固定存活秒数：本次入参 > 插件配置 > 默认 2 分钟
   const title = args.title || 'Claude 需要你决定';
   const rec = options.find(o => o && o.recommended);
   const def = args.default_label || (rec ? rec.label : '');
@@ -105,27 +132,16 @@ function askDialog(args) {
   chime();
   let result;
   try {
-    result = parse(runOsaTimed(makeScript(), SHORT));      // 第一段：存活 SHORT 秒
+    result = parse(runOsaTimed(makeScript(), TIMEOUT));      // 单窗固定存活 TIMEOUT 秒（默认 2 分钟），到点 osascript 被 kill 抛错
   } catch (e) {
-    if (e && e.status === 1) return FALLBACK;               // display dialog 用户点了取消
-    if (userIdleSec() < SHORT) {                            // 用户仍在操作 → 延长
-      chime();
-      try {
-        result = parse(runOsaTimed(makeScript(), LONG));    // 第二段：延长存活
-      } catch (e2) {
-        if (e2 && e2.status === 1) return FALLBACK;
-        pushNow('⏳ 有事待确认', pushBody);
-        return FALLBACK;
-      }
-    } else {
-      pushNow('⏳ 有事待确认', pushBody);                    // 用户离开 → 推手机
-      return FALLBACK;
-    }
+    if (e && e.status === 1) return FALLBACK;                // 用户点了取消（人在）→ 不推
+    scheduleDeferredPush(pushBody);                          // 自动关闭（人不在）→ 回退终端 + 关后 5 分钟仍没回话才合并推
+    return FALLBACK;
   }
   // 选了「以上都不对 / 我要补充」→ 直接弹输入框收集补充，把内容回传，免回终端再问一轮
   if (result === FALLBACK_NONE) {
     try {
-      const out = runOsaTimed(`display dialog "请补充说明你的真实需求（直接输入；点取消则回终端继续聊）" default answer "" with title "${esc(title)}" buttons {"取消","提交"} default button "提交" cancel button "取消" with icon note`, LONG);
+      const out = runOsaTimed(`display dialog "请补充说明你的真实需求（直接输入；点取消则回终端继续聊）" default answer "" with title "${esc(title)}" buttons {"取消","提交"} default button "提交" cancel button "取消" with icon note`, TIMEOUT);
       const txt = field(out, 'text returned').trim();
       return txt ? '用户补充：' + txt : FALLBACK_NONE;       // 有内容→回传；空→回终端
     } catch (e) { return FALLBACK_NONE; }                    // 取消/超时 → 回终端
@@ -135,7 +151,7 @@ function askDialog(args) {
 
 const TOOL = {
   name: 'ask_dialog',
-  description: '弹 macOS 桌面弹窗向用户选择/确认/输入，结果直接返回，使用户无需切回终端。用于方案选择、确认、自由文本回答。窗口默认存活 1 分钟，到点时若用户仍在操作本机则延长到 10 分钟。返回文本以 __FALLBACK__ 开头时表示用户取消/超时/弹窗不可用，应改用内置终端提问。',
+  description: '弹 macOS 桌面弹窗向用户选择/确认/输入，结果直接返回，使用户无需切回终端。用于方案选择、确认、自由文本回答。窗口固定存活 2 分钟，到点未处理则关窗回退终端（关闭后再等 5 分钟，期间用户在终端回过话则免推，否则合并推手机）。返回文本以 __FALLBACK__ 开头时表示用户取消/超时/弹窗不可用，应改用内置终端提问。',
   inputSchema: {
     type: 'object',
     properties: {
@@ -147,8 +163,7 @@ const TOOL = {
       default_label: { type: 'string', description: '默认选中/默认按钮的 label' },
       allow_none: { type: 'boolean', description: '是否附加「以上都不对/我要补充」逃生口，默认 true；选中即返回 __FALLBACK__ 回退终端追问' },
       title: { type: 'string', description: '弹窗标题' },
-      timeout: { type: 'number', description: '弹窗初始存活秒数，默认60（1分钟）' },
-      timeout_extended: { type: 'number', description: '到点时若用户仍在操作本机则延长到的存活秒数，默认600（10分钟）；延长后仍未处理才推手机' }
+      timeout: { type: 'number', description: '本次弹窗存活秒数（不传则用插件配置的默认值，默认120=2分钟）；到点仍未处理则关窗回退终端 + 延迟推手机' }
     },
     required: ['question']
   }
@@ -168,7 +183,10 @@ rl.on('line', (line) => {
   } else if (method === 'tools/call') {
     const p = req.params || {};
     if (p.name === 'ask_dialog') {
-      send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: askDialog(p.arguments || {}) }] } });
+      writeLock();                                          // 标记弹窗活跃 → notify-wait.sh 据此跳过「⏳ 等待你」横幅，避免双弹
+      let text;
+      try { text = askDialog(p.arguments || {}); } finally { clearLock(); } // 成功/失败/异常都清锁
+      send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }] } });
     } else {
       send({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Unknown tool: ' + p.name } });
     }

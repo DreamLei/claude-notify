@@ -6,6 +6,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 case "$1" in true|1|on|yes) ;; *) exit 0 ;; esac   # 开关关 → 放行，走正常流程
+command -v jq >/dev/null 2>&1 || { echo "permission-gate: 缺少 jq，权限门无法解析命令、无法拦截，请安装 jq" >&2; exit 0; }   # 缺 jq → 告警(不静默吞)
 
 c=$(jq -r '.tool_input.command // empty')
 [ -z "$c" ] && exit 0
@@ -30,27 +31,35 @@ in_allowlist() {
 is_dangerous() {
   echo "$1" | grep -qiE 'drop[[:space:]]+(database|schema|table)|truncate[[:space:]]' && return 0
   echo "$1" | grep -qE '(^|[;&|[:space:]])rm[[:space:]]+-[a-zA-Z]*[rR]' && return 0
+  echo "$1" | grep -qE '(^|[;&|[:space:]])rm[[:space:]].*(--recursive|--force|--no-preserve-root)' && return 0
   echo "$1" | grep -qE 'git[[:space:]]+push[[:space:]].*(--force|[[:space:]]-f([[:space:]]|$))|git[[:space:]]+reset[[:space:]]+--hard|git[[:space:]]+clean[[:space:]]+-[a-zA-Z]*f|git[[:space:]]+branch[[:space:]]+-D' && return 0
   return 1
 }
 
+is_dangerous "$c" && exit 0       # 危险命令永远先判 → 避让给危险护栏(防白名单泛化前缀放行危险变体)
 in_allowlist "$c" && exit 0       # 白名单 → 放行
-is_dangerous "$c" && exit 0       # 危险 → 避让给危险护栏
 
 if [ -n "$PGATE_DRYRUN" ]; then echo "WOULD-PROMPT-GATE"; exit 0; fi
 
 CMD=$(printf '%s' "$c" | tr -d '"\\`$' | cut -c1-200)
 FIRST=$(printf '%s' "$c" | sed -E 's/^[[:space:]]+//' | awk '{print $1}')
 afplay /System/Library/Sounds/Ping.aiff 2>/dev/null &
-R=$(osascript -e "display dialog \"Claude 申请执行命令：\" & return & return & \"$CMD\" buttons {\"拒绝\",\"允许\",\"总是允许\"} default button \"允许\" with title \"权限申请\" with icon note giving up after 60" 2>/dev/null)
+# display dialog 三按钮(还原)；原生 giving up after 实现超时，gave up 标志区分超时与点按钮：
+#   · gave up:true = 超时自动关 → 推手机 + 回终端
+#   · 点 拒绝/允许/总是允许 → 对应 deny/allow/白名单（三按钮已占满，无单独「取消」按钮位）
+R=$(osascript -e "display dialog \"Claude 申请执行命令：\" & return & return & \"$CMD\" buttons {\"拒绝\",\"允许\",\"总是允许\"} default button \"允许\" with title \"权限申请\" with icon note giving up after ${PGATE_TIMEOUT:-60}" 2>/dev/null)
 case "$R" in
+  *"gave up:true"*)   # 超时自动放弃 → 推手机 + 回终端
+    case "$NOTIFY_ENABLED" in false|0|off|no) ;; *) bash "$(cd "$(dirname "$0")" && pwd)/notify-push.sh" "⏳ 权限申请待确认" "$CMD" >/dev/null 2>&1 ;; esac
+    exit 0 ;;
   *总是允许*)   # 把命令首词加入 settings 白名单，以后该类命令自动放行
     if [ -n "$FIRST" ]; then
       jq --arg p "Bash($FIRST *)" '.permissions.allow += (if (.permissions.allow|index($p)) then [] else [$p] end)' "$S" > "/tmp/pgate.$$" 2>/dev/null && jq empty "/tmp/pgate.$$" 2>/dev/null && mv "/tmp/pgate.$$" "$S"
     fi
     allow "用户选择总是允许，已加入白名单 Bash($FIRST *)"
     ;;
+  *拒绝*) deny "用户在权限弹窗中点击拒绝" ;;
   *允许*) allow "用户在权限弹窗中点击允许" ;;
-  *)      deny "用户在权限弹窗中拒绝(或超时)" ;;
+  *)      exit 0 ;;   # 兜底(未匹配)→ 回终端
 esac
 exit 0
