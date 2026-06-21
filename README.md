@@ -63,7 +63,7 @@ brew install terminal-notifier
 > 读取优先级：userConfig 环境变量（方式 A）> 本地文件（方式 B/C）。
 
 ### 5. 重启会话验证
-- `ask_dialog` 工具在新会话才加载；`claude mcp list` 应显示 `ask-dialog ✔ Connected`
+- `ask_dialog` 在新会话**启动即常驻加载**（`alwaysLoad`，需 **Claude Code ≥ 2.1.121**），无需先 `ToolSearch`；`claude mcp list` 应显示 `ask-dialog ✔ Connected`
 - 测推送：`bash ~/.claude/.../hooks/notify-push.sh "测试" "通路确认"`（企业微信应 @你收到）
 
 ---
@@ -109,6 +109,10 @@ brew install terminal-notifier
 > ⚠️ `smart_switch` 是 **app 级**判断，分不清同一 app 的不同窗口/项目（开两个 iTerm 看着别的项目时仍判「在看 Claude」而不弹、漏看，靠超时推手机兜底）。**多窗口/多项目并行建议保持默认（始终弹）**。窗口级检测因 hook 无 tty + macOS 多窗口 API 不可靠，未做。
 
 **多个问题**：依次弹多个 `ask_dialog`（一个接一个）。⚠️ macOS 限制：hook 进程无 tty、AppleScriptObjC 的 `NSAlert` 从命令行 osascript 跑 GUI 窗不显示，故**无法做「一屏多字段表单」**；真要多字段需装第三方（如 SwiftDialog）。
+
+**工具常驻（`alwaysLoad: true`）**：`.mcp.json` 给 ask-dialog 设了 `alwaysLoad: true`，让 `ask_dialog` 在**会话启动即载入上下文**。否则 Claude Code 默认把 MCP 工具**延迟加载**（tool-search）——模型得先调 `ToolSearch` 才能用，**新会话常出现「该弹窗却没弹」**。需 **Claude Code ≥ 2.1.121**。
+
+> ⚠️ 这是写死的原生布尔，**无法做成 userConfig 可选开关**：Claude Code 用 zod 严格校验布尔 + `=== true` 比较，`${user_config.*}` 插值出的是字符串（`"true"`/`"false"` 都不等于 `true`、还可能让整个 server 配置解析失败），且没有「保留 server 但取消常驻」的 per-server 设置。**不想要弹窗 / 想省 context** → `/plugin disable claude-notify@dax-tools` 整体停用即可。
 
 ## 组件
 | 文件 | 作用 |
