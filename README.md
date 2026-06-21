@@ -77,6 +77,7 @@ brew install terminal-notifier
 | `mention` | `@all` | 通知 @ 对象（`@all` 或手机号）|
 | `enable_permission_gate` | `false` | 开启「全权限弹窗门」：非白名单/非危险命令也弹桌面授权 |
 | `enable_notifications` | `true` | 通知提醒总开关：关闭后不发「完成/等待」通知与企业微信推送（弹窗提问/授权仍工作）|
+| `enable_wechat_push` | `true` | 企业微信手机推送独立开关：关闭后「超时未处理」不再 @你推企业微信，但本机桌面弹窗/横幅照常（比 `enable_notifications` 总开关更细：留本机通知、只去手机推送）|
 | `smart_switch` | `false` | 默认关=**始终弹浮顶窗**（多窗口最稳）；开启后看着 Claude 宿主(终端/IDE/app)就不弹、走终端 |
 
 ### 本地文件 `~/.claude/.notify-webhook`（userConfig 未设时回退）
@@ -93,6 +94,19 @@ brew install terminal-notifier
 | `NOTIFY_DRYRUN=1` | — | 只打印 payload 不发送（调试）|
 
 `ask_dialog` 参数：`timeout`（初始存活秒数，默认 60）、`timeout_extended`（延长存活，默认 600）、`allow_none`（逃生口，默认开）、选项 `recommended`（标 AI 推荐）等。
+
+---
+
+## 故障排查
+
+| 症状 | 原因 / 解法 |
+|---|---|
+| **「完成/等待」通知 + 企业微信推送**突然**一起**没了 | `enable_notifications` 被设成了 `false` —— 它是**总开关**，关掉后两类通知一并静默（弹窗提问/授权仍工作）。`/plugin configure claude-notify@dax-tools` 或 settings.json 的 `pluginConfigs` 里确认它为 `true`（删掉该项 = 回到默认 `true`）。改完**重启会话**或开一次 `/hooks` 才生效。 |
+| 桌面**只有提示音、没横幅** | 没装 `terminal-notifier` 时这是**正常回退**（hook 无 tty/无 app 身份发不出系统横幅，故备选 afplay 声）。想要横幅：`brew install terminal-notifier`。 |
+| 装了 terminal-notifier **仍不弹横幅** | macOS「系统设置 → 通知 → **terminal-notifier**」里确认「允许通知」开着、「提醒样式」不是「无」。 |
+| 想自测通知却越测越乱 | ⚠️ **别用 `osascript display notification` 自测** —— 命令行 osascript 通知**没有固定 app 身份**，在 VS Code 等集成终端里经常静默失败（`exit 0` 但不显示、或时有声时没声），会严重误导排查。插件改用 `terminal-notifier` 正是为规避这点。要测就直接跑 `terminal-notifier -title 测试 -message ok -sound default`。 |
+| 每次任务结束**弹两次**横幅 | 你大概在自己的 settings.json 里**也**加了 Stop hook 调 terminal-notifier，与插件自带的 `notify-done.sh` 重复了。删掉自建那条即可——**完成通知插件已自带，无需另配 Stop hook**。 |
+| 该弹 `ask_dialog` 却没弹 | 见下方「工作机制 / 工具常驻」：需 Claude Code ≥ 2.1.121 让 `alwaysLoad` 生效；否则新会话首次得先 `ToolSearch` 加载。 |
 
 ---
 
