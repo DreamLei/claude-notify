@@ -25,6 +25,12 @@
       "title": "全权限弹窗门",
       "description": "开启后，非白名单、非危险的普通命令也弹桌面授权窗（允许/拒绝/总是允许），无需切回终端；关闭则走 Claude Code 正常权限流程。危险命令仍由各自的危险护栏处理。",
       "default": false
+    },
+    "enable_notifications": {
+      "type": "boolean",
+      "title": "通知提醒总开关",
+      "description": "控制是否发送「完成 / 等待」通知与企业微信推送。关闭后不再有这些提醒（桌面弹窗提问、授权弹窗仍照常工作）。",
+      "default": true
     }
   }
 }

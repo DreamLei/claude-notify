@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/hooks/notify-done.sh",
+            "command": "NOTIFY_ENABLED=\"${user_config.enable_notifications}\" \"${CLAUDE_PLUGIN_ROOT}\"/hooks/notify-done.sh",
             "timeout": 10
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "WEBHOOK_URL=\"${user_config.webhook_url}\" MENTION=\"${user_config.mention}\" \"${CLAUDE_PLUGIN_ROOT}\"/hooks/notify-wait.sh",
+            "command": "WEBHOOK_URL=\"${user_config.webhook_url}\" MENTION=\"${user_config.mention}\" NOTIFY_ENABLED=\"${user_config.enable_notifications}\" \"${CLAUDE_PLUGIN_ROOT}\"/hooks/notify-wait.sh",
             "timeout": 15
           }
         ]

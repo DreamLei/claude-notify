@@ -34,8 +34,9 @@ function userIdleSec() {
 function runOsaTimed(script, sec) {
   return execFileSync('osascript', ['-e', script], { encoding: 'utf8', env: ENV, timeout: sec * 1000 });
 }
-// 立即推手机（不阻塞）
+// 立即推手机（不阻塞）；通知总开关关闭则不推
 function pushNow(title, body) {
+  if (/^(false|0|off|no)$/i.test(process.env.NOTIFY_ENABLED || '')) return;
   try { spawn('bash', [NOTIFY_SH, title, body], { detached: true, stdio: 'ignore' }).unref(); } catch (e) {}
 }
 
