@@ -154,7 +154,11 @@ function askDialog(args) {
   const question = args.question || '请选择';
   const options = Array.isArray(args.options) ? args.options : [];
   const multiple = !!args.multiple;
-  const allowText = !!args.allow_text || options.length === 0;
+  // 形态路由：只有「没有 options」才退化成纯文本框；有 options 时一律走 JXA 选项框。
+  //   wantInput = 调用方显式要自由输入：无 options 时 = 纯文本框；有 options 时 = 在选项末尾强制附输入框
+  //   （即使 allow_none:false 也拉起输入框，否则 allow_text 会静默失效）。
+  const pureTextBox = options.length === 0;
+  const wantInput = !!args.allow_text;
   const TIMEOUT = Number(args.timeout) || Number(process.env.ASK_DIALOG_TIMEOUT_SEC) || 120;  // 固定存活秒数：本次入参 > 插件配置 > 默认 2 分钟
   const title = args.title || 'Claude 需要你决定';
   const rec = options.find(o => o && o.recommended);
@@ -164,7 +168,7 @@ function askDialog(args) {
   // 手机推送内容：问题 + 选项 + 推荐
   let pushBody = question;
   if (options.length) pushBody += '\n\n选项：' + options.map((o, i) => `\n${i + 1}. ${o.label}${o.recommended ? '（AI推荐）' : ''}${o.description ? ' — ' + o.description : ''}`).join('');
-  else if (allowText) pushBody += '\n\n（需要你输入文本回答）';
+  else pushBody += '\n\n（需要你输入文本回答）';
 
   const descLines = options.filter(o => o && o.description).map(o => `• ${o.label}${o.recommended ? '（AI 推荐）' : ''}：${o.description}`);
   let promptFull = descLines.length ? `${question}\n\n${descLines.join('\n')}` : question;
@@ -172,12 +176,13 @@ function askDialog(args) {
 
   // 按形态构造脚本 + 结果解析
   let makeScript, parse, lang = 'as';
-  if (allowText) {
+  if (pureTextBox) {
     makeScript = () => `display dialog "${esc(promptFull)}" default answer "${esc(args.default_text || '')}" with title "${esc(title)}" buttons {"取消","确定"} default button "确定" cancel button "取消" with icon (POSIX file "${esc(ICON_ICNS)}")`;
     parse = (out) => '用户输入：' + field(out, 'text returned');
   } else {
     // 选择题统一走 JXA 原生勾选框：multiple→复选框，否则→radio 单选（自动互斥）。
     // allow_none（默认 true）追加「其他：」选项 + 输入框，与预设同组互斥 → 补充本身即一个选项，就地回传不回终端。
+    // wantInput（=allow_text）时也强制拉起输入框：实现「选项 + 自由输入」，且即便 allow_none:false 也不丢失输入能力。
     lang = 'js';
     const data = {
       title,
@@ -185,7 +190,7 @@ function askDialog(args) {
       items: options.map(o => o.label),
       multiple,
       defaults: def ? [def] : [],
-      allowSupp: allowNone,
+      allowSupp: allowNone || wantInput,
       otherLabel: '其他：',
       suppPlaceholder: '输入自定义内容；点「取消」则作为转回会话的说明…',
       iconPath: ICON_PNG
@@ -240,7 +245,7 @@ const TOOL = {
       question: { type: 'string', description: '要问用户的问题' },
       options: { type: 'array', description: '可选项；每项 {label, description?, recommended?}。recommended:true 标记 AI 推荐项（自动设为默认高亮/预选并在弹窗顶部显示推荐及理由）。省略 options 则弹文本输入框', items: { type: 'object', properties: { label: { type: 'string' }, description: { type: 'string', description: '该选项说明；推荐项的 description 会作为推荐理由显示' }, recommended: { type: 'boolean', description: '是否为 AI 推荐项' } }, required: ['label'] } },
       multiple: { type: 'boolean', description: '是否允许多选。true=复选框可勾多项；false/省略=radio 单选框（自动互斥）。两种形态都会在末尾附「其他：」选项+输入框' },
-      allow_text: { type: 'boolean', description: '是否弹自由文本输入框' },
+      allow_text: { type: 'boolean', description: '要不要自由文本输入。无 options 时=弹纯文本输入框；有 options 时=在选项末尾强制附输入框（实现「选一个 或 自填」，即便 allow_none:false 也保留输入框）。不影响纯选项形态' },
       default_text: { type: 'string', description: '文本输入框默认值' },
       default_label: { type: 'string', description: '默认选中/默认按钮的 label' },
       allow_none: { type: 'boolean', description: '默认 true：在选项末尾附「其他：」选项+输入框（与预设同组互斥），用户可就地输入自定义内容并直接回传（不回终端）；false=不显示该项' },
