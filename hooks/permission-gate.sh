@@ -8,11 +8,13 @@ export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 case "$1" in true|1|on|yes) ;; *) exit 0 ;; esac   # 开关关 → 放行，走正常流程
 command -v jq >/dev/null 2>&1 || { echo "permission-gate: 缺少 jq，权限门无法解析命令、无法拦截，请安装 jq" >&2; exit 0; }   # 缺 jq → 告警(不静默吞)
 
-c=$(jq -r '.tool_input.command // empty')
+IN=$(cat)   # stdin 只能读一次，先整段读入再多字段解析（permission_mode + command）
+# --dangerously-skip-permissions（permission_mode=bypassPermissions）= 用户已全权放行，不再弹权限窗
+case "$(printf '%s' "$IN" | jq -r '.permission_mode // empty')" in bypassPermissions) exit 0 ;; esac
+
+c=$(printf '%s' "$IN" | jq -r '.tool_input.command // empty')
 [ -z "$c" ] && exit 0
 S="$HOME/.claude/settings.json"
-# 解释器/通用命令首词：点「总是允许」时不写白名单(否则 Bash(mysql *)/Bash(bash *) 之类会放行该解释器的一切命令，形成泛化越权)
-NOGEN='^(env|sudo|doas|mysql|mysqldump|psql|mariadb|sqlplus|redis-cli|mongo|mongosh|bash|sh|zsh|fish|ksh|python|python2|python3|perl|ruby|php|node|deno|bun|npm|npx|pnpm|yarn|ssh|scp|sftp|rsync|nc|ncat|curl|wget|eval|exec|source|docker|docker-compose|kubectl|helm|aws|gcloud|az|terraform|ansible|ansible-playbook|make|xargs|find|git)$'
 
 allow() { printf '%s' "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"permissionDecisionReason\":\"$1\"}}"; }
 deny()  { printf '%s' "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$1\"}}"; }
@@ -56,12 +58,10 @@ case "$R" in
     case "$NOTIFY_ENABLED" in false|0|off|no) ;; *) bash "$(cd "$(dirname "$0")" && pwd)/notify-push.sh" "⏳ 权限申请待确认" "$CMD" >/dev/null 2>&1 ;; esac
     exit 0 ;;
   *总是允许*)   # 把命令首词加入 settings 白名单，以后该类命令自动放行
-    if [ -n "$FIRST" ] && ! printf '%s' "$FIRST" | grep -qE "$NOGEN"; then
+    if [ -n "$FIRST" ]; then
       jq --arg p "Bash($FIRST *)" '.permissions.allow += (if (.permissions.allow|index($p)) then [] else [$p] end)' "$S" > "/tmp/pgate.$$" 2>/dev/null && jq empty "/tmp/pgate.$$" 2>/dev/null && mv "/tmp/pgate.$$" "$S"
-      allow "用户选择总是允许，已加入白名单 Bash($FIRST *)"
-    else
-      allow "用户选择允许（$FIRST 属解释器/通用命令，仅本次放行，不加入白名单以免泛化越权）"
     fi
+    allow "用户选择总是允许，已加入白名单 Bash($FIRST *)"
     ;;
   *拒绝*) deny "用户在权限弹窗中点击拒绝" ;;
   *允许*) allow "用户在权限弹窗中点击允许" ;;
