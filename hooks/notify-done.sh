@@ -5,12 +5,15 @@ cat >/dev/null 2>&1 || true   # 消费 stdin
 # 通知总开关：优先脚本入参 NOTIFY_ENABLED（直接调用兼容），否则读插件自动注入的 CLAUDE_PLUGIN_OPTION_ENABLE_NOTIFICATIONS，默认开。
 # 不再在 hooks.json 命令串里内联 ${user_config.*}：那是 bash 参数展开，未被 harness 替换时会 bad substitution 导致整条 hook 失败、脚本根本不跑。
 ENABLED="${NOTIFY_ENABLED:-${CLAUDE_PLUGIN_OPTION_ENABLE_NOTIFICATIONS:-true}}"
-# [临时自检] 记录 hook 触发 + 实际开关值；确认横幅恢复后删除本行
-echo "$(date '+%F %T') notify-done fired NOTIFY_ENABLED=[$NOTIFY_ENABLED] OPT=[$CLAUDE_PLUGIN_OPTION_ENABLE_NOTIFICATIONS] ENABLED=[$ENABLED]" >> "$HOME/.claude/.notify-debug.log" 2>/dev/null || true
 case "$ENABLED" in false|0|off|no) exit 0 ;; esac   # 通知总开关关 → 不提醒
 TN=$(command -v terminal-notifier 2>/dev/null)
 ICON="$(cd "$(dirname "$0")/../assets" 2>/dev/null && pwd)/cc-icon.png"   # Claude Code logo（自包含于本插件 assets/）
 if [ -n "$TN" ]; then
+  # 渲染横幅的是常驻 GUI 进程 terminal-notifier.app，它继承 launchd 环境而非本脚本的 export。
+  # 在 launchd 全局 locale 为空(C)的机器上，中文会被按 Latin-1 渲染成 æµ 乱码 → 此处把 launchd
+  # 环境强制为 UTF-8，保证 app 下次冷启动以 UTF-8 正确渲染中文(幂等，失败静默不影响通知)。
+  launchctl setenv LANG en_US.UTF-8 2>/dev/null || true
+  launchctl setenv LC_CTYPE en_US.UTF-8 2>/dev/null || true
   "$TN" -title "Claude Code" -subtitle "✅ 完成" -message "本轮任务已结束" -sound Glass -appIcon "$ICON" -contentImage "$ICON" 2>/dev/null || true
 else
   afplay /System/Library/Sounds/Glass.aiff 2>/dev/null || true
