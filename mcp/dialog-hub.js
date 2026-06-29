@@ -137,7 +137,8 @@ function realLaunchDialog({ script, lang, env }) {
   let child = null;
   const promise = new Promise((resolve) => {
     try {
-      child = spawn('osascript', cliArgs, { env });
+      // stdin/stderr 丢弃、只收 stdout：osascript -e 不读 stdin，stderr 不消费则 >64KB 会回压阻塞子进程。
+      child = spawn('osascript', cliArgs, { env, stdio: ['ignore', 'pipe', 'ignore'] });
     } catch (e) {
       resolve({ error: e });
       return;

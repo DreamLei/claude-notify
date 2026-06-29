@@ -64,7 +64,9 @@ APPLESCRIPT
 )
 case "$R" in
   *"gave up:true"*)   # 超时自动放弃 → 推手机 + 回终端
-    case "$NOTIFY_ENABLED" in false|0|off|no) ;; *) bash "$(cd "$(dirname "$0")" && pwd)/notify-push.sh" "⏳ 权限申请待确认" "$CMD" >/dev/null 2>&1 ;; esac
+    # 通知总开关：hook 拿到的是 CLAUDE_PLUGIN_OPTION_ENABLE_NOTIFICATIONS（非 MCP 的 NOTIFY_ENABLED），与 notify-done/notify-wait 一致用 fallback 链。
+    ENABLED="${NOTIFY_ENABLED:-${CLAUDE_PLUGIN_OPTION_ENABLE_NOTIFICATIONS:-true}}"
+    case "$ENABLED" in false|0|off|no) ;; *) bash "$(cd "$(dirname "$0")" && pwd)/notify-push.sh" "⏳ 权限申请待确认" "$CMD" >/dev/null 2>&1 ;; esac
     exit 0 ;;
   *总是允许*)   # 把命令首词加入 settings 白名单，以后该类命令自动放行
     if [ -n "$FIRST" ]; then

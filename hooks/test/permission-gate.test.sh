@@ -19,14 +19,23 @@ mkdir -p "$SBX/home/.claude" "$SBX/bin"
 S="$SBX/home/.claude/settings.json"
 LOCK="$SBX/home/.claude/.pgate.lock"
 
-# mock osascript：吞掉 stdin 脚本，按 MOCK_BTN 模拟点击结果
+# mock osascript：吞掉 stdin 脚本，按 MOCK_BTN 模拟点击结果（__GIVEUP__ 模拟超时自动放弃）
 cat > "$SBX/bin/osascript" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null 2>&1
+[ "$MOCK_BTN" = "__GIVEUP__" ] && { echo "gave up:true"; exit 0; }
 echo "button returned:${MOCK_BTN:-允许}, gave up:false"
 EOF
 chmod +x "$SBX/bin/osascript"
+# mock curl：记录每次「真实推送」到 curl.log，供断言推送是否发生
+cat > "$SBX/bin/curl" <<EOF
+#!/usr/bin/env bash
+echo CALLED >> "$SBX/curl.log"
+EOF
+chmod +x "$SBX/bin/curl"
 export PATH="$SBX/bin:$PATH"
+# 提供本地 webhook 文件，让 hook 路径的 notify-push 能拿到 URL（hook 无 MCP 注入的 WEBHOOK_URL）
+printf 'https://example.invalid/hook\n@all\n' > "$SBX/home/.claude/.notify-webhook"
 
 reset_settings(){ echo '{"permissions":{"allow":[]}}' > "$S"; }
 run_gate(){ # $1=命令字符串 $2=模拟按钮 → stdout=hook 输出
@@ -59,6 +68,17 @@ echo "[4] 普通「允许」分支不写白名单"
 reset_settings
 run_gate 'plaincmd zzz' 允许 >/dev/null
 [ "$(jq -c '.permissions.allow' "$S")" = "[]" ] && ok "允许分支未动白名单" || no "允许分支误写白名单"
+
+echo "[5] 超时(gave up)推送受「通知总开关」控制（A：用 CLAUDE_PLUGIN_OPTION_ENABLE_NOTIFICATIONS）"
+reset_settings
+rm -f "$SBX/curl.log"
+run_gate 'cmdEnabled aaa' __GIVEUP__ >/dev/null            # 总开关默认开 → 应推
+[ -f "$SBX/curl.log" ] && ok "开关开/缺省时超时推送发生" || no "缺省应推却没推"
+rm -f "$SBX/curl.log"
+export CLAUDE_PLUGIN_OPTION_ENABLE_NOTIFICATIONS=false      # export 才能被 run_gate 内层 bash 继承
+run_gate 'cmdDisabled bbb' __GIVEUP__ >/dev/null            # 关 → 不推
+unset CLAUDE_PLUGIN_OPTION_ENABLE_NOTIFICATIONS
+[ ! -f "$SBX/curl.log" ] && ok "关掉通知总开关后超时不推（A 修复生效）" || no "关掉后仍推（A 未生效）"
 
 echo "---- PASS=$PASS FAIL=$FAIL ----"
 [ "$FAIL" -eq 0 ]
