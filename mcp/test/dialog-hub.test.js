@@ -202,6 +202,72 @@ test('smart_switch（异步返回 false）：正常弹窗并可本机作答', as
   } finally { hub.stop(); }
 });
 
+test('多实例隔离：两个会话各写 <pid>.json，跨会话发现 + 聚合 + --latest 取全局最新', async () => {
+  const dir = path.join(os.tmpdir(), `adh-reg-${process.pid}-${++seq}`);
+  fs.mkdirSync(dir, { recursive: true });
+  // 造两个独立会话，注册表写进同一目录、socket 各异、now 注入以确定 started 大小关系。
+  const mk = (tag, nowVal) => {
+    const base = path.join(os.tmpdir(), `adh-multi-${process.pid}-${seq}-${tag}`);
+    const ls = { killed: 0, resolve: null, launched: 0 };
+    const hub = new DialogHub({
+      socketPath: base + '.sock',
+      registryPath: path.join(dir, tag + '.json'),
+      lockPath: base + '.lock',
+      chime: () => {},
+      now: () => nowVal,
+      launchDialog: () => {
+        ls.launched += 1;
+        let r; const promise = new Promise((res) => { r = res; }); ls.resolve = r;
+        return { promise, kill: () => { ls.killed += 1; } };
+      }
+    });
+    return { hub, ls };
+  };
+  const A = mk('1001', 1000);   // 先开
+  const B = mk('1002', 2000);   // 后开（started 更大）
+  await A.hub.start(); await B.hub.start();
+  try {
+    const pa = A.hub.ask({ question: 'A 问', options: [{ label: 'x' }] });
+    await waitLaunched(A.ls);
+    const pb = B.hub.ask({ question: 'B 问', options: [{ label: 'y' }] });
+    await waitLaunched(B.ls);
+
+    const sessions = client.listSessions(dir);
+    assert.strictEqual(sessions.length, 2);                 // 两个会话各自一份注册项，互不覆盖
+    assert.notStrictEqual(sessions[0].socket, sessions[1].socket);
+
+    const dialogs = await client.collectDialogs(sessions.map((s) => s.socket));
+    assert.strictEqual(dialogs.length, 2);                  // 跨会话聚合到两轮
+
+    const latest = dialogs.reduce((m, d) => (!m || d.started > m.started ? d : m), null);
+    assert.strictEqual(latest.question, 'B 问');            // --latest 跨会话取全局最新（B）
+
+    // 把答案精确投给 B 持有的 socket → 只结算 B，A 不受影响
+    const resp = await client.answer(latest.socket, latest.dialog_id, '选 y');
+    assert.strictEqual(resp.status, 'accepted');
+    assert.strictEqual(await pb, '用户回答：选 y（来源：' + SOURCE_CODEX + '）');
+    assert.strictEqual(A.hub.list().length, 1);             // A 仍活跃，未被串台
+
+    A.ls.resolve({ code: 0, stdout: JSON.stringify({ action: 'ok', selected: ['x'], other: false, supplement: '' }) });
+    await pa;
+  } finally { A.hub.stop(); B.hub.stop(); }
+});
+
+test('多实例隔离：stop() 删除本会话注册项', async () => {
+  const dir = path.join(os.tmpdir(), `adh-reg2-${process.pid}-${++seq}`);
+  const reg = path.join(dir, '1.json');
+  const { hub, launchState } = harness({ registryPath: reg });
+  await hub.start();
+  try {
+    const p = hub.ask(choiceArgs);
+    await waitLaunched(launchState);
+    assert.ok(fs.existsSync(reg));                          // 活跃期间注册项存在
+    hub.stop();                                             // stop 会 _settle 在飞轮次 → p resolve(FALLBACK)
+    assert.strictEqual(fs.existsSync(reg), false);          // stop 后注册项被清
+    await p;
+  } finally { hub.stop(); }
+});
+
 test('空答案被拒：Codex 提交空串返回 empty，不结算', async () => {
   const { hub, launchState } = harness();
   await hub.start();

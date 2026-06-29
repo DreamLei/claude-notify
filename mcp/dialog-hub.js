@@ -4,8 +4,9 @@
 // ②本机侧通道（Unix socket）接收 Codex 中转的某一轮答案，并主动关掉对应桌面弹窗
 // ③首答获胜裁决：桌面本机作答 / Codex 中转 / 超时 三者谁先到谁赢，后到者被忽略或返回明确冲突状态。
 //
-// dialog_id 关联轮次；活跃轮次写独立注册表 ~/.claude/.ask-dialog-registry.json 供 Codex 发现，
-// 锁文件 ~/.claude/.ask-dialog-active 仍只写纯数字时间戳（notify-wait.sh 的既有契约，不能动）。
+// dialog_id 关联轮次；活跃轮次写按 pid 隔离的注册表 ~/.claude/.ask-dialog-registry/<pid>.json 供 Codex 发现
+// （socket 同样按 pid 隔离 ~/.claude/.ask-dialog.<pid>.sock，多会话并发互不抢占）；
+// 锁文件 ~/.claude/.ask-dialog-active 仍只写纯数字时间戳（notify-wait.sh 的既有契约，全机共享，不能动）。
 
 const { spawn } = require('child_process');
 const net = require('net');
@@ -19,9 +20,15 @@ const SOURCE_CODEX = 'Codex中转';
 const FALLBACK = '__FALLBACK__：用户取消 / 超时 / 弹窗不可用。请改用内置 AskUserQuestion 在终端继续提问（终端交互始终保留为后备）。';
 const FALLBACK_TERM = '__FALLBACK__：用户当前正看着 Claude 宿主（终端/IDE/桌面 app），直接用内置 AskUserQuestion 提问即可，无需弹桌面窗。';
 
-const DEFAULT_SOCKET_PATH = path.join(os.homedir(), '.claude', '.ask-dialog.sock');
-const DEFAULT_REGISTRY_PATH = path.join(os.homedir(), '.claude', '.ask-dialog-registry.json');
-const DEFAULT_LOCK_PATH = path.join(os.homedir(), '.claude', '.ask-dialog-active');
+const PID = process.pid;
+const CLAUDE_DIR = path.join(os.homedir(), '.claude');
+// socket 按 pid 隔离 → 多个并发 Claude 会话各用各的侧通道，互不抢占/覆盖。
+const DEFAULT_SOCKET_PATH = path.join(CLAUDE_DIR, '.ask-dialog.' + PID + '.sock');
+// 注册表改为目录：每个会话写自己的 <pid>.json，Codex 端枚举该目录即可发现所有活跃会话及其 socket。
+const DEFAULT_REGISTRY_DIR = path.join(CLAUDE_DIR, '.ask-dialog-registry');
+const DEFAULT_REGISTRY_PATH = path.join(DEFAULT_REGISTRY_DIR, PID + '.json');
+// 锁文件仍是全机共享的纯数字时间戳（notify-wait.sh 的既有契约，不能动）。
+const DEFAULT_LOCK_PATH = path.join(CLAUDE_DIR, '.ask-dialog-active');
 const ICON_PNG = path.join(__dirname, '..', 'assets', 'cc-icon.png');
 
 // —— JXA 弹窗脚本构造（与原实现逐字保持，保证桌面弹窗行为不变）——
@@ -188,6 +195,7 @@ class DialogHub {
     }
     if (this._server) { try { this._server.close(); } catch (e) {} this._server = null; }
     try { fs.unlinkSync(this.socketPath); } catch (e) {}
+    try { fs.unlinkSync(this.registryPath); } catch (e) {}   // 移除本会话注册项，避免遗留死 socket 指针
   }
 
   _onConn(conn) {
@@ -264,7 +272,10 @@ class DialogHub {
   }
 
   _writeRegistry() {
-    try { fs.writeFileSync(this.registryPath, JSON.stringify({ socket: this.socketPath, dialogs: this.list() })); } catch (e) {}
+    try {
+      fs.mkdirSync(path.dirname(this.registryPath), { recursive: true });
+      fs.writeFileSync(this.registryPath, JSON.stringify({ pid: PID, socket: this.socketPath, dialogs: this.list() }));
+    } catch (e) {}
   }
 
   // 锁文件只写纯数字时间戳（notify-wait.sh 契约）：有活跃轮次→写 now 秒；全部结束→删。
@@ -417,6 +428,7 @@ module.exports = {
   SOURCE_LOCAL,
   SOURCE_CODEX,
   DEFAULT_SOCKET_PATH,
+  DEFAULT_REGISTRY_DIR,
   DEFAULT_REGISTRY_PATH,
   DEFAULT_LOCK_PATH
 };

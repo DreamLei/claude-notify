@@ -5,8 +5,11 @@
 const net = require('net');
 const path = require('path');
 const os = require('os');
+const fs = require('fs');
 
+// socket 已按 pid 隔离，无单一固定路径；此常量仅作 ASK_DIALOG_SOCKET 未设时的兜底（一般走注册表发现）。
 const DEFAULT_SOCKET_PATH = path.join(os.homedir(), '.claude', '.ask-dialog.sock');
+const DEFAULT_REGISTRY_DIR = path.join(os.homedir(), '.claude', '.ask-dialog-registry');
 
 // 发送单条命令，resolve 解析后的响应对象；连接失败 / 超时 reject。
 function sendCommand(socketPath, obj, timeoutMs) {
@@ -38,4 +41,31 @@ const list = (socketPath) => sendCommand(socketPath, { cmd: 'list' });
 const answer = (socketPath, dialogId, text) =>
   sendCommand(socketPath, dialogId ? { cmd: 'answer', dialog_id: dialogId, text } : { cmd: 'answer', latest: true, text });
 
-module.exports = { sendCommand, list, answer, DEFAULT_SOCKET_PATH };
+// 枚举注册表目录里所有会话项（每个 <pid>.json = {pid, socket, dialogs}）；坏文件静默跳过。
+function listSessions(registryDir) {
+  registryDir = registryDir || DEFAULT_REGISTRY_DIR;
+  let files;
+  try { files = fs.readdirSync(registryDir); } catch (e) { return []; }
+  const out = [];
+  for (const f of files) {
+    if (f.slice(-5) !== '.json') continue;
+    try {
+      const rec = JSON.parse(fs.readFileSync(path.join(registryDir, f), 'utf8'));
+      if (rec && rec.socket) out.push(rec);
+    } catch (e) {}
+  }
+  return out;
+}
+
+// 逐个连接给定 socket 取活跃弹窗，聚合成 [{socket, dialog_id, question, started}]；连不上的（死会话）自动跳过。
+async function collectDialogs(sockets) {
+  const out = [];
+  for (const sock of sockets) {
+    let resp;
+    try { resp = await sendCommand(sock, { cmd: 'list' }); } catch (e) { continue; }
+    for (const d of (resp && resp.dialogs) || []) out.push(Object.assign({ socket: sock }, d));
+  }
+  return out;
+}
+
+module.exports = { sendCommand, list, answer, listSessions, collectDialogs, DEFAULT_SOCKET_PATH, DEFAULT_REGISTRY_DIR };

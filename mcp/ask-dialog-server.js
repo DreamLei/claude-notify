@@ -87,7 +87,8 @@ const hub = new DialogHub({
   pushDeferred: scheduleDeferredPush,
   smartSwitch: smartSwitchActive,
   env: ENV,
-  socketPath: process.env.ASK_DIALOG_SOCKET || undefined,   // 可选覆盖（隔离测试 / 多实例）；默认 ~/.claude/.ask-dialog.sock
+  socketPath: process.env.ASK_DIALOG_SOCKET || undefined,   // 可选覆盖（隔离测试 / 多实例）；默认按 pid 隔离 ~/.claude/.ask-dialog.<pid>.sock
+  registryPath: process.env.ASK_DIALOG_REGISTRY_DIR ? path.join(process.env.ASK_DIALOG_REGISTRY_DIR, process.pid + '.json') : undefined,
   defaultTimeoutSec: Number(process.env.ASK_DIALOG_TIMEOUT_SEC) || 120
 });
 
