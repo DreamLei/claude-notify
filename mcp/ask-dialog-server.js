@@ -1,144 +1,26 @@
 #!/usr/bin/env node
 'use strict';
 // 桌面弹窗提问 MCP server（零依赖，stdio + newline-delimited JSON-RPC）。
-// 工具 ask_dialog：弹 macOS 原生窗让用户选择/输入，结果直接回传给模型，无需切回终端。
-// 窗口固定存活 2 分钟；到点未处理则关窗 + 返回 __FALLBACK__（模型据此回退到内置终端提问）。
-// 关闭后不立刻推手机：再等 5 分钟，期间用户若在终端回过话则免推，否则把堆积的多条问题合并成一条推出去。
+// 工具 ask_dialog：弹 macOS 原生窗让用户选择/输入。窗口与「本机侧通道」并存：
+//   · 桌面弹窗（本机）作答    —— 用户在弹窗里点选/输入
+//   · Codex 经 Unix socket 中转某一轮答案 —— 见 answer-dialog.js
+// 任一侧首个有效答案立即结算该轮，MCP 主动关闭/失效另一侧；后到答案不覆盖首答，返回 already_answered。
+// 弹窗异步 spawn（不再 execFileSync 阻塞事件循环），故 socket 在弹窗等待期间仍能收 Codex 答案。
+// 窗口固定存活 2 分钟；到点未处理则关窗 + 返回 __FALLBACK__（模型据此回退到内置终端提问），
+// 关闭后再等 5 分钟，期间用户在终端回过话则免推，否则把堆积的多条问题合并成一条推出去。
 
 const readline = require('readline');
-const { execFileSync, spawn } = require('child_process');
+const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const NOTIFY_SH = path.join(__dirname, '..', 'hooks', 'notify-push.sh'); // 同包脚本，免硬编码
-const ICON_PNG = path.join(__dirname, '..', 'assets', 'cc-icon.png');   // Claude Code logo（JXA NSAlert 用 PNG）
-// 弹窗活跃锁：提问框存活期间写本文件，notify-wait.sh 检测到即跳过「⏳ 等待你」横幅，避免双弹。
-const LOCK_PATH = path.join(os.homedir(), '.claude', '.ask-dialog-active');
-function writeLock() { try { fs.writeFileSync(LOCK_PATH, String(Math.floor(Date.now() / 1000))); } catch (e) {} }
-function clearLock() { try { fs.unlinkSync(LOCK_PATH); } catch (e) {} }
+const { DialogHub, buildChoiceJxa, buildTextJxa } = require('./dialog-hub');
 
-const ENV = { ...process.env, LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' }; // 强制 UTF-8 防中文乱码
+const NOTIFY_SH = path.join(__dirname, '..', 'hooks', 'notify-push.sh');
+const ENV = { ...process.env, LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' };
 
 function send(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); }
-function esc(s) { return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"'); }
 
-function chime() {
-  try { spawn('afplay', ['/System/Library/Sounds/Ping.aiff'], { detached: true, stdio: 'ignore' }).unref(); } catch (e) {}
-}
-// 跑 osascript，最多等 sec 秒（到点 kill 进程关窗）。正常返回 stdout；超时或用户取消则抛错。
-// lang='js' 走 JavaScript for Automation（JXA），否则默认 AppleScript。
-function runOsaTimed(script, sec, lang) {
-  const cliArgs = lang === 'js' ? ['-l', 'JavaScript', '-e', script] : ['-e', script];
-  return execFileSync('osascript', cliArgs, { encoding: 'utf8', env: ENV, timeout: sec * 1000 });
-}
-
-// 给 NSApp 装一个含「编辑」菜单的主菜单：NSAlert 模态里 NSTextField 的 Cmd+X/C/V/A
-// 必须经主菜单的 cut:/copy:/paste:/selectAll: 沿响应链分发才生效——没有主菜单时这些快捷键被吞，
-// 表现为「输入框不能复制粘贴」。target 留 nil → 自动落到当前第一响应者（field editor）。
-const EDIT_MENU_JXA = [
-  '(function(){',
-  '  var mm = $.NSMenu.alloc.init;',
-  '  var ei = $.NSMenuItem.alloc.init;',
-  '  mm.addItem(ei);',
-  "  var em = $.NSMenu.alloc.initWithTitle('Edit');",
-  '  ei.submenu = em;',
-  '  function add(t, s, k){ em.addItem($.NSMenuItem.alloc.initWithTitleActionKeyEquivalent(t, $.NSSelectorFromString(s), k)); }',
-  "  add('Cut','cut:','x'); add('Copy','copy:','c'); add('Paste','paste:','v'); add('Select All','selectAll:','a');",
-  '  $.NSApp.mainMenu = mm;',
-  '})();'
-].join('\n');
-
-// 构造 JXA 纯文本输入弹窗：NSAlert + 单个 NSTextField（替代 AppleScript display dialog——
-// 后者的输入框天生不支持 Cmd+V 粘贴，无法修复）。装 EDIT_MENU_JXA 后即支持复制/粘贴/全选。
-// 回传 JSON {action:'ok'|'cancel', text:""}（取消也带回框内文字作为转回会话的说明）。
-function buildTextJxa(d) {
-  return [
-    "ObjC.import('Cocoa');",
-    'var D = ' + JSON.stringify(d) + ';',
-    'var W = 380, FIELDH = 24;',
-    'var view = $.NSView.alloc.initWithFrame($.NSMakeRect(0, 0, W, FIELDH));',
-    'var field = $.NSTextField.alloc.initWithFrame($.NSMakeRect(0, 0, W, FIELDH));',
-    'field.stringValue = D.defaultText;',
-    'view.addSubview(field);',
-    'var alert = $.NSAlert.alloc.init;',
-    'if (D.iconPath) { var _ic = $.NSImage.alloc.initWithContentsOfFile(D.iconPath); if (_ic && !_ic.isNil()) alert.icon = _ic; }',
-    'alert.messageText = D.title;',
-    'alert.informativeText = D.prompt;',
-    "alert.addButtonWithTitle('确定');",
-    "alert.addButtonWithTitle('取消');",
-    'alert.accessoryView = view;',
-    'alert.window.setLevel(3);',
-    'alert.window.setInitialFirstResponder(field);',
-    '$.NSApp.setActivationPolicy(0);',
-    EDIT_MENU_JXA,
-    '$.NSApp.activateIgnoringOtherApps(true);',
-    'var resp = alert.runModal;',
-    'var txt = ObjC.unwrap(field.stringValue);',
-    "var out = (resp.toString() === '1000') ? JSON.stringify({ action: 'ok', text: txt }) : JSON.stringify({ action: 'cancel', text: txt });",
-    'out;'
-  ].join('\n');
-}
-
-// 构造 JXA 选择弹窗脚本：真原生勾选框（multiple→复选框 / 否则→radio 自动互斥）。
-// allowSupp 时追加一项「其他：」选项 + 紧邻输入框，与预设选项同组互斥——补充本身即一个选项，
-// 用户选「其他」并填框即可就地回传自定义内容（不回终端）。零外部依赖，仅用 macOS 自带 Cocoa 桥。
-// 入参经 JSON.stringify 注入天然安全转义；回传 JSON {selected:[],other:bool,supplement:""} 或 "__CANCEL__"。
-function buildChoiceJxa(d) {
-  return [
-    "ObjC.import('Cocoa');",
-    'var D = ' + JSON.stringify(d) + ';',
-    'var W = 460, ROW = 26, PAD = 8, FIELDH = 24, OW = 70;',
-    'var n = D.items.length;',
-    'var rows = n + (D.allowSupp ? 1 : 0);',
-    'var H = ROW * rows + PAD * 2;',
-    'var view = $.NSView.alloc.initWithFrame($.NSMakeRect(0, 0, W, H));',
-    'var boxes = [];',
-    'for (var i = 0; i < n; i++) {',
-    '  var lab = D.items[i];',
-    '  var y = H - PAD - ROW * (i + 1);',
-    '  var btn = $.NSButton.alloc.initWithFrame($.NSMakeRect(0, y, W, ROW));',
-    '  btn.setButtonType(D.multiple ? 3 : 4);',
-    "  if (!D.multiple) btn.setAction($.NSSelectorFromString('radioHit:'));",
-    '  btn.title = lab;',
-    '  if (D.defaults.indexOf(lab) !== -1) btn.state = 1;',
-    '  view.addSubview(btn);',
-    '  boxes.push(btn);',
-    '}',
-    'var otherBtn = null, field = null;',
-    'if (D.allowSupp) {',
-    '  otherBtn = $.NSButton.alloc.initWithFrame($.NSMakeRect(0, PAD, OW, ROW));',
-    '  otherBtn.setButtonType(D.multiple ? 3 : 4);',
-    "  if (!D.multiple) otherBtn.setAction($.NSSelectorFromString('radioHit:'));",
-    '  otherBtn.title = D.otherLabel;',
-    '  view.addSubview(otherBtn);',
-    '  field = $.NSTextField.alloc.initWithFrame($.NSMakeRect(OW + 4, PAD + 1, W - OW - 4, FIELDH));',
-    '  field.setPlaceholderString(D.suppPlaceholder);',
-    '  view.addSubview(field);',
-    '}',
-    'var alert = $.NSAlert.alloc.init;',
-    'if (D.iconPath) { var _ic = $.NSImage.alloc.initWithContentsOfFile(D.iconPath); if (_ic && !_ic.isNil()) alert.icon = _ic; }', // Claude Code logo 覆盖默认 osascript 图标
-    'alert.messageText = D.title;',
-    'alert.informativeText = D.prompt;',
-    "alert.addButtonWithTitle('确定');",
-    "alert.addButtonWithTitle('取消');",
-    'alert.accessoryView = view;',
-    'alert.window.setLevel(3);',
-    'if (field) alert.window.setInitialFirstResponder(field);', // 文本框初始获得键盘焦点
-    '$.NSApp.setActivationPolicy(0);',                           // Regular app → 才能接收键盘输入
-    EDIT_MENU_JXA,                                               // 装「编辑」菜单 → 「其他」输入框支持 Cmd+X/C/V/A
-    '$.NSApp.activateIgnoringOtherApps(true);',
-    'var resp = alert.runModal;',
-    "var note = field ? ObjC.unwrap(field.stringValue).trim() : '';", // 框内容（确定/取消都读取）
-    'var out;',
-    "if (resp.toString() === '1000') {",
-    '  var sel = [];',
-    '  for (var j = 0; j < boxes.length; j++) { if (Number(boxes[j].state) > 0) sel.push(ObjC.unwrap(boxes[j].title)); }',
-    '  var other = otherBtn ? (Number(otherBtn.state) > 0) : false;',
-    "  out = JSON.stringify({ action: 'ok', selected: sel, other: other, supplement: note });",
-    "} else { out = JSON.stringify({ action: 'cancel', supplement: note }); }", // 取消也带回框里的说明
-    'out;'
-  ].join('\n');
-}
 // 立即推手机（不阻塞）；通知总开关关闭、或企业微信推送被单独关闭则不推
 function pushNow(title, body) {
   if (/^(false|0|off|no)$/i.test(process.env.NOTIFY_ENABLED || '')) return;
@@ -146,16 +28,12 @@ function pushNow(title, body) {
   try { spawn('bash', [NOTIFY_SH, title, body], { detached: true, stdio: 'ignore' }).unref(); } catch (e) {}
 }
 
-// —— 延迟合并推送 ——
-// 弹窗超时自动关闭后不立刻推：攒进队列，自首条起 +5 分钟统一判定。
-// 这 5 分钟里用户若在终端提交过输入（UserPromptSubmit hook 刷新 LAST_PROMPT_PATH）= 已回来答话 → 全部免推；
-// 否则把窗口内堆积的多条问题合并成一条企业微信推出去（进程常驻，直接用 in-process 定时器）。
+// —— 延迟合并推送（与原实现一致）——
 const LAST_PROMPT_PATH = path.join(os.homedir(), '.claude', '.last-user-prompt');
-// 关闭后延迟时长：优先 ASK_DIALOG_DEFER_MS（毫秒，便于测试细调）→ 其次 ASK_DIALOG_DEFER_MIN（分钟，插件配置注入）→ 默认 5 分钟
 const DEFER_MS = Number(process.env.ASK_DIALOG_DEFER_MS)
   || (Number(process.env.ASK_DIALOG_DEFER_MIN) ? Number(process.env.ASK_DIALOG_DEFER_MIN) * 60000 : 0)
   || 5 * 60 * 1000;
-let pending = [];                    // [{ ts(秒), q }]
+let pending = [];
 let flushTimer = null;
 function nowSec() { return Math.floor(Date.now() / 1000); }
 function readLastPromptSec() {
@@ -163,139 +41,59 @@ function readLastPromptSec() {
 }
 function scheduleDeferredPush(question) {
   pending.push({ ts: nowSec(), q: question });
-  if (!flushTimer) flushTimer = setTimeout(flushPending, DEFER_MS);   // 锚定窗口内第一条，5 分钟后统一 flush
+  if (!flushTimer) flushTimer = setTimeout(flushPending, DEFER_MS);
 }
 function flushPending() {
   flushTimer = null;
   const items = pending; pending = [];
   if (!items.length) return;
   const earliest = items.reduce((m, i) => Math.min(m, i.ts), Infinity);
-  if (readLastPromptSec() > earliest) return;                          // 用户已回来在终端答话 → 整窗免推
+  if (readLastPromptSec() > earliest) return;
   if (items.length === 1) { pushNow('⏳ 有事待确认', items[0].q); return; }
   pushNow(`⏳ ${items.length} 条待确认`, items.map((it, i) => `【${i + 1}】${it.q}`).join('\n\n———\n\n'));
 }
-// 当前前台 app 名（lsappinfo，无需辅助功能权限）；用于判断用户是否正看终端
-function frontApp() {
-  try {
-    const out = execFileSync('sh', ['-c', 'lsappinfo info -only name "$(lsappinfo front)"'], { encoding: 'utf8', timeout: 2000 });
-    const m = out.match(/"LSDisplayName"="([^"]*)"/);
-    return m ? m[1] : '';
-  } catch (e) { return ''; }
+
+// 异步跑一条命令，resolve 其 stdout（出错/超时 → 空串）。不经 shell（无 sh -c），参数数组传入，无注入面。
+function runCmd(cmd, cmdArgs, timeoutMs) {
+  return new Promise((resolve) => {
+    let child;
+    try { child = spawn(cmd, cmdArgs, { env: ENV }); } catch (e) { return resolve(''); }
+    let out = '';
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} resolve(''); }, timeoutMs || 2000);
+    child.stdout.on('data', (d) => { out += d; });
+    child.on('error', () => { clearTimeout(timer); resolve(''); });
+    child.on('close', () => { clearTimeout(timer); resolve(out); });
+  });
 }
-// 前台是否为 Claude Code 的宿主（各种终端 / IDE / 桌面 app）——是则用户正看着 Claude，不弹桌面窗
-function inHostApp() {
-  return /iterm|terminal|ghostty|wezterm|warp|alacritty|kitty|hyper|tabby|rio|konsole|wave|jetbrains|intellij|pycharm|webstorm|goland|datagrip|rubymine|phpstorm|clion|rider|android studio|fleet|cursor|\bcode\b|claude/i.test(frontApp());
+
+// 当前前台 app 名（lsappinfo，无需辅助功能权限）：先取前台 ASN，再查其显示名。两段异步子进程，不用 sh。
+async function frontApp() {
+  const asn = (await runCmd('lsappinfo', ['front'])).trim();
+  if (!asn) return '';
+  const info = await runCmd('lsappinfo', ['info', '-only', 'name', asn]);
+  const m = info.match(/"LSDisplayName"="([^"]*)"/);
+  return m ? m[1] : '';
+}
+async function inHostApp() {
+  const name = await frontApp();
+  return /iterm|terminal|ghostty|wezterm|warp|alacritty|kitty|hyper|tabby|rio|konsole|wave|jetbrains|intellij|pycharm|webstorm|goland|datagrip|rubymine|phpstorm|clion|rider|android studio|fleet|cursor|\bcode\b|claude/i.test(name);
+}
+async function smartSwitchActive() {
+  if (!/^(1|true|on|yes)$/i.test(process.env.SMART_SWITCH || '')) return false;
+  return inHostApp();
 }
 
-const FALLBACK = '__FALLBACK__：用户取消 / 超时 / 弹窗不可用。请改用内置 AskUserQuestion 在终端继续提问（终端交互始终保留为后备）。';
-const FALLBACK_TERM = '__FALLBACK__：用户当前正看着 Claude 宿主（终端/IDE/桌面 app），直接用内置 AskUserQuestion 提问即可，无需弹桌面窗。';
-
-function askDialog(args) {
-  // 智能切换（smart_switch，默认关=始终弹浮顶窗最稳妥）：开启且前台是 Claude 宿主时才不弹、回退终端
-  if (/^(1|true|on|yes)$/i.test(process.env.SMART_SWITCH || '') && inHostApp()) return FALLBACK_TERM;
-  const question = args.question || '请选择';
-  const options = Array.isArray(args.options) ? args.options : [];
-  const multiple = !!args.multiple;
-  // 形态路由：只有「没有 options」才退化成纯文本框；有 options 时一律走 JXA 选项框。
-  //   wantInput = 调用方显式要自由输入：无 options 时 = 纯文本框；有 options 时 = 在选项末尾强制附输入框
-  //   （即使 allow_none:false 也拉起输入框，否则 allow_text 会静默失效）。
-  const pureTextBox = options.length === 0;
-  const wantInput = !!args.allow_text;
-  const TIMEOUT = Number(args.timeout) || Number(process.env.ASK_DIALOG_TIMEOUT_SEC) || 120;  // 固定存活秒数：本次入参 > 插件配置 > 默认 2 分钟
-  const title = args.title || 'Claude 需要你决定';
-  const rec = options.find(o => o && o.recommended);
-  const def = args.default_label || (rec ? rec.label : '');
-  const allowNone = args.allow_none !== false;
-
-  // 手机推送内容：问题 + 选项 + 推荐
-  let pushBody = question;
-  if (options.length) pushBody += '\n\n选项：' + options.map((o, i) => `\n${i + 1}. ${o.label}${o.recommended ? '（AI推荐）' : ''}${o.description ? ' — ' + o.description : ''}`).join('');
-  else pushBody += '\n\n（需要你输入文本回答）';
-
-  const descLines = options.filter(o => o && o.description).map(o => `• ${o.label}${o.recommended ? '（AI 推荐）' : ''}：${o.description}`);
-  let promptFull = descLines.length ? `${question}\n\n${descLines.join('\n')}` : question;
-  if (rec) promptFull = `💡 AI 推荐：${rec.label}${rec.description ? '（' + rec.description + '）' : ''}\n\n${promptFull}`;
-
-  // 按形态构造脚本 + 结果解析
-  let makeScript, parse, lang = 'as';
-  if (pureTextBox) {
-    // 纯文本框走 JXA（不再用 AppleScript display dialog，后者不支持粘贴）→ 装编辑菜单后可复制/粘贴。
-    lang = 'js';
-    const data = { title, prompt: promptFull, defaultText: args.default_text || '', iconPath: ICON_PNG };
-    makeScript = () => buildTextJxa(data);
-    parse = (out) => {
-      out = (out || '').trim();
-      if (out === '') return FALLBACK;
-      let o;
-      try { o = JSON.parse(out); } catch (e) { return FALLBACK; }
-      if (o.action === 'cancel') {
-        const note = (o.text || '').trim();
-        return note
-          ? '__FALLBACK__：用户取消弹窗、要求转回当前会话处理，附说明：「' + note + '」。请在终端据此继续，不要重复弹窗。'
-          : FALLBACK;
-      }
-      return '用户输入：' + (o.text || '');
-    };
-  } else {
-    // 选择题统一走 JXA 原生勾选框：multiple→复选框，否则→radio 单选（自动互斥）。
-    // allow_none（默认 true）追加「其他：」选项 + 输入框，与预设同组互斥 → 补充本身即一个选项，就地回传不回终端。
-    // wantInput（=allow_text）时也强制拉起输入框：实现「选项 + 自由输入」，且即便 allow_none:false 也不丢失输入能力。
-    lang = 'js';
-    const data = {
-      title,
-      prompt: promptFull,
-      items: options.map(o => o.label),
-      multiple,
-      defaults: def ? [def] : [],
-      allowSupp: allowNone || wantInput,
-      otherLabel: '其他：',
-      suppPlaceholder: '输入自定义内容；点「取消」则作为转回会话的说明…',
-      iconPath: ICON_PNG
-    };
-    makeScript = () => buildChoiceJxa(data);
-    parse = (out) => {
-      out = (out || '').trim();
-      if (out === '') return FALLBACK;
-      let o;
-      try { o = JSON.parse(out); } catch (e) { return FALLBACK; }
-      if (o.action === 'cancel') {
-        const note = (o.supplement || '').trim();
-        // 取消 = 转回当前会话；框里写了说明就一并带回（仍是 __FALLBACK__，模型据此回终端处理）
-        return note
-          ? '__FALLBACK__：用户取消弹窗、要求转回当前会话处理，附说明：「' + note + '」。请在终端据此继续，不要重复弹窗。'
-          : FALLBACK;
-      }
-      const sel = Array.isArray(o.selected) ? o.selected : [];
-      const supp = o.supplement || '';
-      if (multiple) {
-        const parts = [];
-        if (sel.length) parts.push('用户选择：' + sel.join(', '));
-        if (supp) parts.push('用户补充：' + supp);          // 勾了「其他」或填了框 → 采纳补充
-        return parts.length ? parts.join('；') : FALLBACK;
-      }
-      // 单选：选「其他」用补充；否则用选中的预设项；都没选但填了框也用补充
-      if (o.other) return supp ? '用户补充：' + supp : FALLBACK;
-      if (sel.length) return '用户选择：' + sel[0];
-      if (supp) return '用户补充：' + supp;
-      return FALLBACK;
-    };
-  }
-
-  chime();
-  let result;
-  try {
-    result = parse(runOsaTimed(makeScript(), TIMEOUT, lang)); // 单窗固定存活 TIMEOUT 秒（默认 2 分钟），到点 osascript 被 kill 抛错
-  } catch (e) {
-    if (e && e.status === 1) return FALLBACK;                // 用户点了取消（人在）→ 不推
-    scheduleDeferredPush(pushBody);                          // 自动关闭（人不在）→ 回退终端 + 关后 5 分钟仍没回话才合并推
-    return FALLBACK;
-  }
-  return result;
-}
+const hub = new DialogHub({
+  pushDeferred: scheduleDeferredPush,
+  smartSwitch: smartSwitchActive,
+  env: ENV,
+  socketPath: process.env.ASK_DIALOG_SOCKET || undefined,   // 可选覆盖（隔离测试 / 多实例）；默认 ~/.claude/.ask-dialog.sock
+  defaultTimeoutSec: Number(process.env.ASK_DIALOG_TIMEOUT_SEC) || 120
+});
 
 const TOOL = {
   name: 'ask_dialog',
-  description: '弹 macOS 桌面弹窗向用户选择/确认/输入，结果直接返回，使用户无需切回终端。用于方案选择、确认、自由文本回答。窗口固定存活 2 分钟，到点未处理则关窗回退终端（关闭后再等 5 分钟，期间用户在终端回过话则免推，否则合并推手机）。返回文本以 __FALLBACK__ 开头时表示用户取消/超时/弹窗不可用，应改用内置终端提问。',
+  description: '弹 macOS 桌面弹窗向用户选择/确认/输入，结果直接返回，使用户无需切回终端。桌面弹窗与终端/Codex 侧通道并存：任一侧首个有效答案立即结算该轮，另一侧自动失效。用于方案选择、确认、自由文本回答。窗口固定存活 2 分钟，到点未处理则关窗回退终端（关闭后再等 5 分钟，期间用户在终端回过话则免推，否则合并推手机）。返回文本以 __FALLBACK__ 开头时表示用户取消/超时/弹窗不可用，应改用内置终端提问；成功返回带「（来源：电脑本机|Codex中转）」标注。',
   inputSchema: {
     type: 'object',
     properties: {
@@ -321,16 +119,16 @@ rl.on('line', (line) => {
   try { req = JSON.parse(line); } catch (e) { return; }
   const { id, method } = req;
   if (method === 'initialize') {
-    send({ jsonrpc: '2.0', id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'ask-dialog', version: '1.0.0' } } });
+    send({ jsonrpc: '2.0', id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'ask-dialog', version: '2.0.0' } } });
   } else if (method === 'tools/list') {
     send({ jsonrpc: '2.0', id, result: { tools: [TOOL] } });
   } else if (method === 'tools/call') {
     const p = req.params || {};
     if (p.name === 'ask_dialog') {
-      writeLock();                                          // 标记弹窗活跃 → notify-wait.sh 据此跳过「⏳ 等待你」横幅，避免双弹
-      let text;
-      try { text = askDialog(p.arguments || {}); } finally { clearLock(); } // 成功/失败/异常都清锁
-      send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }] } });
+      // 异步：弹窗与 socket 侧通道并行竞速，谁先给出有效答案谁赢；期间事件循环不被阻塞。
+      hub.ask(p.arguments || {})
+        .then((text) => send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }] } }))
+        .catch((e) => send({ jsonrpc: '2.0', id, error: { code: -32603, message: 'ask_dialog failed: ' + (e && e.message || e) } }));
     } else {
       send({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Unknown tool: ' + p.name } });
     }
@@ -341,5 +139,14 @@ rl.on('line', (line) => {
   }
 });
 
+// 启动本机侧通道 socket（失败不致命：退化为仅桌面弹窗，行为同旧版）。
+hub.start().catch((e) => { try { process.stderr.write('ask-dialog socket 启动失败：' + (e && e.message || e) + '\n'); } catch (_) {} });
+
+// 进程退出时收尾：关窗 + 清 socket/注册表/锁。
+function cleanup() { try { hub.stop(); } catch (e) {} }
+process.on('SIGINT', () => { cleanup(); process.exit(0); });
+process.on('SIGTERM', () => { cleanup(); process.exit(0); });
+process.on('exit', cleanup);
+
 // 供测试 require（被 node 直接当 MCP server 跑时无副作用）
-module.exports = { askDialog, buildChoiceJxa, buildTextJxa };
+module.exports = { hub, buildChoiceJxa, buildTextJxa, askDialog: (args) => hub.ask(args) };
