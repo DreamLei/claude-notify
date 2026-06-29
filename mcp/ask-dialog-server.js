@@ -39,6 +39,28 @@ function nowSec() { return Math.floor(Date.now() / 1000); }
 function readLastPromptSec() {
   try { return parseInt(fs.readFileSync(LAST_PROMPT_PATH, 'utf8').trim(), 10) || 0; } catch (e) { return 0; }
 }
+
+// 本会话任务主题（transcript 里 Claude Code 自动维护的 ai-title）。
+// MCP server 无 hook stdin，但环境里有 CLAUDE_CODE_SESSION_ID（全局唯一）→ 在 ~/.claude/projects/*/
+// 下找同名 <sid>.jsonl 即精确锁定「本会话」自己的 transcript，并发多会话各取各的、零歧义。取不到 → 空串。
+function sessionTopic() {
+  try {
+    const sid = process.env.CLAUDE_CODE_SESSION_ID;
+    if (!sid) return '';
+    const projects = path.join(os.homedir(), '.claude', 'projects');
+    let dirs;
+    try { dirs = fs.readdirSync(projects); } catch (e) { return ''; }
+    let file = '';
+    for (const d of dirs) { const f = path.join(projects, d, sid + '.jsonl'); if (fs.existsSync(f)) { file = f; break; } }
+    if (!file) return '';
+    const lines = fs.readFileSync(file, 'utf8').split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {       // 末条 ai-title = 最新主题
+      if (lines[i].indexOf('"type":"ai-title"') === -1) continue;
+      try { const o = JSON.parse(lines[i]); if (o && o.aiTitle) return String(o.aiTitle); } catch (e) {}
+    }
+    return '';
+  } catch (e) { return ''; }
+}
 function scheduleDeferredPush(question) {
   pending.push({ ts: nowSec(), q: question });
   if (!flushTimer) flushTimer = setTimeout(flushPending, DEFER_MS);
@@ -49,8 +71,10 @@ function flushPending() {
   if (!items.length) return;
   const earliest = items.reduce((m, i) => Math.min(m, i.ts), Infinity);
   if (readLastPromptSec() > earliest) return;
-  if (items.length === 1) { pushNow('⏳ 有事待确认', items[0].q); return; }
-  pushNow(`⏳ ${items.length} 条待确认`, items.map((it, i) => `【${i + 1}】${it.q}`).join('\n\n———\n\n'));
+  const topic = sessionTopic();
+  const suffix = topic ? `\n\n任务：${topic}` : '';   // 附本会话主题，便于一眼分清是哪个任务
+  if (items.length === 1) { pushNow('⏳ 有事待确认', items[0].q + suffix); return; }
+  pushNow(`⏳ ${items.length} 条待确认`, items.map((it, i) => `【${i + 1}】${it.q}`).join('\n\n———\n\n') + suffix);
 }
 
 // 异步跑一条命令，resolve 其 stdout（出错/超时 → 空串）。不经 shell（无 sh -c），参数数组传入，无注入面。
@@ -112,42 +136,48 @@ const TOOL = {
   }
 };
 
-const rl = readline.createInterface({ input: process.stdin });
-rl.on('line', (line) => {
-  line = line.trim();
-  if (!line) return;
-  let req;
-  try { req = JSON.parse(line); } catch (e) { return; }
-  const { id, method } = req;
-  if (method === 'initialize') {
-    send({ jsonrpc: '2.0', id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'ask-dialog', version: '2.0.0' } } });
-  } else if (method === 'tools/list') {
-    send({ jsonrpc: '2.0', id, result: { tools: [TOOL] } });
-  } else if (method === 'tools/call') {
-    const p = req.params || {};
-    if (p.name === 'ask_dialog') {
-      // 异步：弹窗与 socket 侧通道并行竞速，谁先给出有效答案谁赢；期间事件循环不被阻塞。
-      hub.ask(p.arguments || {})
-        .then((text) => send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }] } }))
-        .catch((e) => send({ jsonrpc: '2.0', id, error: { code: -32603, message: 'ask_dialog failed: ' + (e && e.message || e) } }));
-    } else {
-      send({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Unknown tool: ' + p.name } });
+// 运行时（读 stdin、起 socket、装退出钩子）仅在被当作 MCP server 直接跑时执行；
+// 被测试 require 时不触发这些副作用（否则 readline 挂在 stdin 上、socket 占用，测试无法收尾）。
+function runServer() {
+  const rl = readline.createInterface({ input: process.stdin });
+  rl.on('line', (line) => {
+    line = line.trim();
+    if (!line) return;
+    let req;
+    try { req = JSON.parse(line); } catch (e) { return; }
+    const { id, method } = req;
+    if (method === 'initialize') {
+      send({ jsonrpc: '2.0', id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'ask-dialog', version: '2.0.0' } } });
+    } else if (method === 'tools/list') {
+      send({ jsonrpc: '2.0', id, result: { tools: [TOOL] } });
+    } else if (method === 'tools/call') {
+      const p = req.params || {};
+      if (p.name === 'ask_dialog') {
+        // 异步：弹窗与 socket 侧通道并行竞速，谁先给出有效答案谁赢；期间事件循环不被阻塞。
+        hub.ask(p.arguments || {})
+          .then((text) => send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }] } }))
+          .catch((e) => send({ jsonrpc: '2.0', id, error: { code: -32603, message: 'ask_dialog failed: ' + (e && e.message || e) } }));
+      } else {
+        send({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Unknown tool: ' + p.name } });
+      }
+    } else if (method && method.indexOf('notifications/') === 0) {
+      // notification：不回应
+    } else if (id !== undefined) {
+      send({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Method not found: ' + method } });
     }
-  } else if (method && method.indexOf('notifications/') === 0) {
-    // notification：不回应
-  } else if (id !== undefined) {
-    send({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Method not found: ' + method } });
-  }
-});
+  });
 
-// 启动本机侧通道 socket（失败不致命：退化为仅桌面弹窗，行为同旧版）。
-hub.start().catch((e) => { try { process.stderr.write('ask-dialog socket 启动失败：' + (e && e.message || e) + '\n'); } catch (_) {} });
+  // 启动本机侧通道 socket（失败不致命：退化为仅桌面弹窗，行为同旧版）。
+  hub.start().catch((e) => { try { process.stderr.write('ask-dialog socket 启动失败：' + (e && e.message || e) + '\n'); } catch (_) {} });
 
-// 进程退出时收尾：关窗 + 清 socket/注册表/锁。
-function cleanup() { try { hub.stop(); } catch (e) {} }
-process.on('SIGINT', () => { cleanup(); process.exit(0); });
-process.on('SIGTERM', () => { cleanup(); process.exit(0); });
-process.on('exit', cleanup);
+  // 进程退出时收尾：关窗 + 清 socket/注册表/锁。
+  function cleanup() { try { hub.stop(); } catch (e) {} }
+  process.on('SIGINT', () => { cleanup(); process.exit(0); });
+  process.on('SIGTERM', () => { cleanup(); process.exit(0); });
+  process.on('exit', cleanup);
+}
+
+if (require.main === module) runServer();
 
 // 供测试 require（被 node 直接当 MCP server 跑时无副作用）
-module.exports = { hub, buildChoiceJxa, buildTextJxa, askDialog: (args) => hub.ask(args) };
+module.exports = { hub, buildChoiceJxa, buildTextJxa, sessionTopic, askDialog: (args) => hub.ask(args) };

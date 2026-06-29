@@ -5,9 +5,17 @@ export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 # 通知总开关：优先 NOTIFY_ENABLED，否则读插件自动注入的 CLAUDE_PLUGIN_OPTION_ENABLE_NOTIFICATIONS，默认开（理由同 notify-done.sh）。
 ENABLED="${NOTIFY_ENABLED:-${CLAUDE_PLUGIN_OPTION_ENABLE_NOTIFICATIONS:-true}}"
 case "$ENABLED" in false|0|off|no) cat >/dev/null 2>&1; exit 0 ;; esac   # 通知总开关关
+IN=$(cat 2>/dev/null)   # 一次读入 stdin（含 .message 与 transcript_path），下面分别解析
 MSG=""
-if command -v jq >/dev/null 2>&1; then MSG=$(cat 2>/dev/null | jq -r '.message // empty' 2>/dev/null); else cat >/dev/null 2>&1 || true; fi
+DIR="$(cd "$(dirname "$0")" && pwd)"
+if command -v jq >/dev/null 2>&1; then
+  MSG=$(printf '%s' "$IN" | jq -r '.message // empty' 2>/dev/null)
+  # 任务主题：从本会话 transcript 取 ai-title，拼到等待消息后（原消息 · 主题）；取不到则不拼。
+  TR=$(printf '%s' "$IN" | jq -r '.transcript_path // empty' 2>/dev/null)
+  TOPIC=$(bash "$DIR/session-topic.sh" "$TR" 2>/dev/null)
+fi
 [ -z "$MSG" ] && MSG="需要你确认或选择，请回到终端"
+[ -n "${TOPIC:-}" ] && MSG="$MSG · $TOPIC"
 
 # 若 ask_dialog 弹窗正活跃（MCP server 已弹自己的浮顶提问框），跳过本横幅，避免「提问框 + 等待你」双弹。
 # Notification 事件可能略早于 MCP server 写锁，故首查不到时给一点缓冲再判一次。
