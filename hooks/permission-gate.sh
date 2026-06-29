@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # PreToolUse/Bash「全权限弹窗门」：开关开启时，非白名单、非危险的普通命令弹桌面授权窗。
-# 开关由 plugin userConfig enable_permission_gate 控制，作为 $1 传入（"true" 开）。
+# 开关由 plugin userConfig enable_permission_gate 控制：优先读插件注入的 CLAUDE_PLUGIN_OPTION_ENABLE_PERMISSION_GATE，
+# $1 仅作直接调用/测试兜底。不再在 hooks.json 命令串里内联 ${user_config.*}——那是 bash 参数展开，
+# 未被 harness 替换时会 bad substitution 导致整条 PreToolUse hook 在每条 bash 命令上失败（理由同 notify-done.sh）。
 # 危险命令在此避让（交给独立的危险护栏，如个人版 db-guard），不重复弹窗。
 # 测试：PGATE_DRYRUN=1。
 set -o pipefail
 export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
-case "$1" in true|1|on|yes) ;; *) exit 0 ;; esac   # 开关关 → 放行，走正常流程
+GATE="${1:-${CLAUDE_PLUGIN_OPTION_ENABLE_PERMISSION_GATE:-false}}"
+case "$GATE" in true|1|on|yes) ;; *) exit 0 ;; esac   # 开关关 → 放行，走正常流程
 command -v jq >/dev/null 2>&1 || { echo "permission-gate: 缺少 jq，权限门无法解析命令、无法拦截，请安装 jq" >&2; exit 0; }   # 缺 jq → 告警(不静默吞)
 
 IN=$(cat)   # stdin 只能读一次，先整段读入再多字段解析（permission_mode + command）
