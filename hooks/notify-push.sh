@@ -44,6 +44,8 @@ if [ -n "$NOTIFY_DRYRUN" ]; then echo "WOULD-PUSH payload=$PAYLOAD"; exit 0; fi
 # 冷却去重：默认 300s 内同一条内容只推一次。按内容(title+body)分桶而非全局单桶 →
 # 重复的同一告警被压制，但不同的告警(如「权限申请待确认」vs「有事待确认」)不会互相挤掉而丢失。
 COOLDOWN=${NOTIFY_COOLDOWN:-300}
+# 顺手清理早已过期的旧桶文件（>1 天），避免不同内容的冷却戳在 ~/.claude 无限堆积。冷却窗最长几分钟，1 天前的戳必已失效。
+find "$HOME/.claude" -maxdepth 1 -name '.notify-last.*' -type f -mtime +1 -delete 2>/dev/null || true
 KEY=$(printf '%s' "$TEXT" | cksum | cut -d' ' -f1)   # cksum 零依赖，按内容生成桶键
 STAMP="$HOME/.claude/.notify-last.$KEY"
 now=$(date +%s)

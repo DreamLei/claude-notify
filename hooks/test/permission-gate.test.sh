@@ -80,5 +80,21 @@ run_gate 'cmdDisabled bbb' __GIVEUP__ >/dev/null            # 关 → 不推
 unset CLAUDE_PLUGIN_OPTION_ENABLE_NOTIFICATIONS
 [ ! -f "$SBX/curl.log" ] && ok "关掉通知总开关后超时不推（A 修复生效）" || no "关掉后仍推（A 未生效）"
 
+echo "[6] 白名单前缀须锚定词边界：Bash(git *) 放行「git …」但不放行 gitfoo（#1 修复）"
+# 白名单命中→直接 exit 0 空输出放行；未命中→走弹窗产出 JSON。据「输出是否为空」区分两者。
+echo '{"permissions":{"allow":["Bash(git *)"]}}' > "$S"
+OUT=$(run_gate 'git status' 允许)
+[ -z "$OUT" ] && ok "git status 命中白名单、免弹窗放行" || no "git status 未命中（输出：$OUT）"
+OUT=$(run_gate 'gitfoo --x' 允许)
+[ -n "$OUT" ] && ok "gitfoo 未被 Bash(git *) 越界放行（仍走弹窗）" || no "gitfoo 被越界放行（#1 未生效）"
+
+echo "[7] 项目级 settings.local.json 白名单也被识别（#2 修复）"
+echo '{"permissions":{"allow":[]}}' > "$S"             # 全局空
+PROJ="$SBX/proj"; mkdir -p "$PROJ/.claude"
+echo '{"permissions":{"allow":["Bash(deploy *)"]}}' > "$PROJ/.claude/settings.local.json"
+OUT=$(printf '%s' "{\"tool_input\":{\"command\":$(jq -Rn --arg c 'deploy now' '$c')}}" \
+  | MOCK_BTN=允许 HOME="$SBX/home" CLAUDE_PROJECT_DIR="$PROJ" bash "$GATE" true 2>/dev/null)
+[ -z "$OUT" ] && ok "项目级白名单命中、免弹窗放行" || no "项目级白名单未被识别（输出：$OUT）"
+
 echo "---- PASS=$PASS FAIL=$FAIL ----"
 [ "$FAIL" -eq 0 ]

@@ -178,8 +178,29 @@ class DialogHub {
   }
 
   // —— 本机侧通道：Unix socket 常驻监听，Codex 经 dialog-client 发来 {cmd,...} 单行 JSON ——
+  // 清扫别的会话被 SIGKILL/崩溃后残留的注册项与 socket 文件（process.on('exit') 不在 SIGKILL 时触发，故启动时兜底）。
+  // 只删进程确已不存在(ESRCH)的项；EPERM(存在但无权)或仍活的会话一律保留，绝不误删他会话。
+  _sweepDeadSessions() {
+    const dir = path.dirname(this.registryPath);
+    let files;
+    try { files = fs.readdirSync(dir); } catch (e) { return; }
+    for (const f of files) {
+      if (f.slice(-5) !== '.json') continue;
+      const full = path.join(dir, f);
+      let rec;
+      try { rec = JSON.parse(fs.readFileSync(full, 'utf8')); } catch (e) { continue; }
+      if (!rec || typeof rec.pid !== 'number' || rec.pid === PID) continue;   // 跳过坏文件与本会话自身
+      let dead = false;
+      try { process.kill(rec.pid, 0); } catch (e) { dead = (e.code === 'ESRCH'); }   // ESRCH=死；EPERM/其它=保留
+      if (!dead) continue;
+      try { fs.unlinkSync(full); } catch (e) {}
+      if (rec.socket) { try { fs.unlinkSync(rec.socket); } catch (e) {} }
+    }
+  }
+
   start() {
     if (this._server) return Promise.resolve();
+    try { this._sweepDeadSessions(); } catch (e) {}          // 兜底清理崩溃会话残留（失败不致命）
     try { fs.unlinkSync(this.socketPath); } catch (e) {}     // 清理上次异常退出残留的 socket 文件
     return new Promise((resolve, reject) => {
       const server = net.createServer((conn) => this._onConn(conn));

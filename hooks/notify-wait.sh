@@ -27,6 +27,13 @@ ask_dialog_active() {
     [ -f "$f" ] || continue
     mt=$(stat -f %m "$f" 2>/dev/null); [ -n "$mt" ] || continue
     [ $((now - mt)) -lt 1800 ] || continue
+    # 写该注册项的会话进程已死(SIGKILL/崩溃残留)→ 其 dialogs 是陈旧的，不算活跃，跳过；
+    # 否则崩溃会话会在 1800s 内误抑制所有会话的「等待你」横幅。区分 ESRCH(死)与 EPERM(存在但无权)：仅前者算死。
+    pid=$(grep -o '"pid":[0-9][0-9]*' "$f" 2>/dev/null | head -1 | grep -o '[0-9][0-9]*')
+    if [ -n "$pid" ]; then
+      kerr=$(kill -0 "$pid" 2>&1); krc=$?
+      [ "$krc" -ne 0 ] && { case "$kerr" in *[Pp]ermitted*) ;; *) continue;; esac; }
+    fi
     grep -q '"dialogs":\[{' "$f" 2>/dev/null && return 0   # 非空 dialogs 数组（紧凑 JSON，无空格）
   done
   return 1

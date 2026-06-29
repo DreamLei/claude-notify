@@ -19,15 +19,22 @@ S="$HOME/.claude/settings.json"
 allow() { printf '%s' "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"permissionDecisionReason\":\"$1\"}}"; }
 deny()  { printf '%s' "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$1\"}}"; }
 
-# 命中 settings.json 白名单（Bash(prefix*) 前缀匹配）→ 放行
+# 命中白名单（Bash(prefix *) 前缀匹配）→ 放行。
+# 同时查全局 ~/.claude/settings.json 与项目级 $CLAUDE_PROJECT_DIR/.claude/{settings.json,settings.local.json}：
+# 与 Claude Code 自身的白名单口径一致，否则对「项目级已允许」的命令仍会重复弹窗。
 in_allowlist() {
-  local cmd="$1" pat prefix
-  while IFS= read -r pat; do
-    case "$pat" in Bash\(*\)) prefix="${pat#Bash(}"; prefix="${prefix%)}";; *) continue;; esac
-    prefix="${prefix%\*}"; prefix="${prefix%% }"
-    [ -z "$prefix" ] && continue
-    case "$cmd" in "$prefix"*) return 0;; esac
-  done < <(jq -r '.permissions.allow[]?' "$S" 2>/dev/null)
+  local cmd="$1" pat prefix sf
+  for sf in "$S" \
+            "${CLAUDE_PROJECT_DIR:+$CLAUDE_PROJECT_DIR/.claude/settings.json}" \
+            "${CLAUDE_PROJECT_DIR:+$CLAUDE_PROJECT_DIR/.claude/settings.local.json}"; do
+    [ -n "$sf" ] && [ -f "$sf" ] || continue
+    while IFS= read -r pat; do
+      case "$pat" in Bash\(*\)) prefix="${pat#Bash(}"; prefix="${prefix%)}";; *) continue;; esac
+      prefix="${prefix%\*}"          # 只去掉尾随通配 * —— 保留其前的空格以锚定词边界，故 Bash(git *) 放行「git …」但不放行 gitfoo
+      [ -z "$prefix" ] && continue
+      case "$cmd" in "$prefix"*) return 0;; esac
+    done < <(jq -r '.permissions.allow[]?' "$sf" 2>/dev/null)
+  done
   return 1
 }
 

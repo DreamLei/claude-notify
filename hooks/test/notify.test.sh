@@ -71,6 +71,11 @@ rm -f "$SBX/notify.log"; do_wait
 printf '{"pid":1,"socket":"x","dialogs":[]}' > "$REG/1.json"
 rm -f "$SBX/notify.log"; do_wait
 [ -f "$SBX/notify.log" ] && ok "registry 无活跃弹窗 → 正常提醒" || no "空 registry 误判为活跃、漏提醒"
+# C3：写注册项的会话进程已死(崩溃残留) → 即便 dialogs 非空也不算活跃 → 应正常提醒（#4 修复）
+rm -f "$REG"/*.json
+printf '{"pid":99999,"socket":"x","dialogs":[{"dialog_id":"d9","question":"q","started":1}]}' > "$REG/99999.json"
+rm -f "$SBX/notify.log"; do_wait
+[ -f "$SBX/notify.log" ] && ok "死会话陈旧注册项不再误抑制横幅（#4 修复生效）" || no "死会话仍误判活跃、漏提醒"
 
 echo "---- PASS=$PASS FAIL=$FAIL ----"
 [ "$FAIL" -eq 0 ]

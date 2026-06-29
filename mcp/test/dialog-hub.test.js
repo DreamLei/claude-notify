@@ -268,6 +268,29 @@ test('多实例隔离：stop() 删除本会话注册项', async () => {
   } finally { hub.stop(); }
 });
 
+test('启动清扫：死 pid 的注册项与 socket 残留被清，活/无权进程的项保留', async () => {
+  const dir = path.join(os.tmpdir(), `adh-sweep-${process.pid}-${++seq}`);
+  fs.mkdirSync(dir, { recursive: true });
+  const deadJson = path.join(dir, '99999.json');
+  const deadSock = path.join(dir, 'dead.sock');
+  fs.writeFileSync(deadSock, 'x');                                  // 占位 socket 文件
+  fs.writeFileSync(deadJson, JSON.stringify({ pid: 99999, socket: deadSock, dialogs: [{ dialog_id: 'd', question: 'q', started: 1 }] }));
+  const aliveJson = path.join(dir, 'alive.json');
+  fs.writeFileSync(aliveJson, JSON.stringify({ pid: process.pid, socket: 'whatever', dialogs: [] }));   // 活进程(本测试自身)→ 保留
+
+  const base = path.join(os.tmpdir(), `adh-sweep-self-${process.pid}-${seq}`);
+  const hub = new DialogHub({
+    socketPath: base + '.sock', registryPath: path.join(dir, 'self.json'), lockPath: base + '.lock',
+    chime: () => {}, launchDialog: () => ({ promise: new Promise(() => {}), kill: () => {} })
+  });
+  await hub.start();
+  try {
+    assert.strictEqual(fs.existsSync(deadJson), false, '死 pid 注册项应被清');
+    assert.strictEqual(fs.existsSync(deadSock), false, '死 pid 的 socket 文件应被清');
+    assert.strictEqual(fs.existsSync(aliveJson), true, '活进程的注册项必须保留');
+  } finally { hub.stop(); }
+});
+
 test('空答案被拒：Codex 提交空串返回 empty，不结算', async () => {
   const { hub, launchState } = harness();
   await hub.start();
