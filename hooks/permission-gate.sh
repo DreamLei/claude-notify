@@ -76,7 +76,13 @@ case "$R" in
   *"gave up:true"*)   # 超时自动放弃 → 推手机 + 回终端
     # 通知总开关：hook 拿到的是 CLAUDE_PLUGIN_OPTION_ENABLE_NOTIFICATIONS（非 MCP 的 NOTIFY_ENABLED），与 notify-done/notify-wait 一致用 fallback 链。
     ENABLED="${NOTIFY_ENABLED:-${CLAUDE_PLUGIN_OPTION_ENABLE_NOTIFICATIONS:-true}}"
-    case "$ENABLED" in false|0|off|no) ;; *) bash "$(cd "$(dirname "$0")" && pwd)/notify-push.sh" "⏳ 权限申请待确认" "$CMD" >/dev/null 2>&1 ;; esac
+    GDIR="$(cd "$(dirname "$0")" && pwd)"
+    # 附本会话任务主题（transcript_path 来自本 hook 的 stdin $IN，精确对应当前会话）；取不到则只推命令。
+    TR=$(printf '%s' "$IN" | jq -r '.transcript_path // empty' 2>/dev/null)
+    TOPIC=$(bash "$GDIR/session-topic.sh" "$TR" 2>/dev/null)
+    BODY="$CMD"; [ -n "$TOPIC" ] && BODY="$CMD
+任务：$TOPIC"
+    case "$ENABLED" in false|0|off|no) ;; *) bash "$GDIR/notify-push.sh" "⏳ 权限申请待确认" "$BODY" >/dev/null 2>&1 ;; esac
     exit 0 ;;
   *总是允许*)   # 把命令首词加入 settings 白名单，以后该类命令自动放行
     if [ -n "$FIRST" ]; then
