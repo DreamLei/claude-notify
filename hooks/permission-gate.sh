@@ -46,7 +46,7 @@ in_allowlist "$c" && exit 0       # 白名单 → 放行
 if [ -n "$PGATE_DRYRUN" ]; then echo "WOULD-PROMPT-GATE"; exit 0; fi
 
 CMD=$(printf '%s' "$c" | tr -d '"\\`$' | cut -c1-200)
-FIRST=$(printf '%s' "$c" | sed -E 's/^[[:space:]]+//' | awk '{print $1}')
+FIRST=$(printf '%s' "$c" | sed -E 's/^[[:space:]]+//' | awk '{print $1}' | tr -d '"\\`$')   # 同 CMD 剔除引号/反斜杠/反引号/$：FIRST 会拼进 allow 的手写 JSON，防破坏
 ICON="$(cd "$(dirname "$0")/../assets" 2>/dev/null && pwd)/cc-icon.icns"   # Claude Code logo（自包含于本插件 assets/）
 afplay /System/Library/Sounds/Ping.aiff 2>/dev/null &
 # display dialog 三按钮(还原)；原生 giving up after 实现超时，gave up 标志区分超时与点按钮：
@@ -79,6 +79,9 @@ case "$R" in
           rmdir "$LOCK" 2>/dev/null
           break
         fi
+        # 抢锁失败：临界区只有亚秒级的 jq+mv，锁目录若已 ≥10s 必是进程被杀的崩溃残留 → 强拆，下一轮重抢。
+        LMT=$(stat -f %m "$LOCK" 2>/dev/null)
+        [ -n "$LMT" ] && [ $(( $(date +%s) - LMT )) -ge 10 ] && rmdir "$LOCK" 2>/dev/null
         i=$((i + 1)); sleep 0.2
       done
     fi
