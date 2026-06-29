@@ -31,7 +31,7 @@
 ### 1. 装 plugin
 团队 marketplace 方式（推荐）：
 ```
-/plugin marketplace add git@gitlab.zenlayer.net:dax/claude-notify.git
+/plugin marketplace add git@github.com:DreamLei/claude-notify.git
 /plugin install claude-notify@dax-tools
 ```
 本地开发/试用：
