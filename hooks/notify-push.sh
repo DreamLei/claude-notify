@@ -7,8 +7,10 @@
 # 冷却：默认 300s(5分钟) 内只推一条，避免重复轰炸（NOTIFY_COOLDOWN 覆盖）。
 # 测试：NOTIFY_DRYRUN=1 只打印 payload、不发送、不计冷却。
 export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
-# 企业微信推送开关：WECHAT_PUSH_ENABLED=false/0/off/no 时彻底不推（plugin userConfig enable_wechat_push 注入；独立于通知总开关，脚本侧兜底防其它调用方）
-case "$WECHAT_PUSH_ENABLED" in false|0|off|no) exit 0 ;; esac
+# 企业微信推送开关：=false/0/off/no 时彻底不推。MCP server 注入 WECHAT_PUSH_ENABLED；hook（如 permission-gate）
+# 调用时该名为空、拿到的是 CLAUDE_PLUGIN_OPTION_ENABLE_WECHAT_PUSH → 用 fallback 链，让本脚本对所有调用方都成为开关权威。
+WPE="${WECHAT_PUSH_ENABLED:-${CLAUDE_PLUGIN_OPTION_ENABLE_WECHAT_PUSH:-true}}"
+case "$WPE" in false|0|off|no) exit 0 ;; esac
 NODE=$(command -v node 2>/dev/null || echo node)   # 动态定位 node，免硬编码（兼容 Intel/Apple Silicon）
 # 优先用 plugin userConfig 注入的环境变量（WEBHOOK_URL/MENTION）；否则回退本地文件
 URL="$WEBHOOK_URL"
@@ -39,9 +41,13 @@ fi
 
 if [ -n "$NOTIFY_DRYRUN" ]; then echo "WOULD-PUSH payload=$PAYLOAD"; exit 0; fi
 
-# 冷却去重：默认 300s 内只推一条，后续重复的直接跳过
+# 冷却去重：默认 300s 内同一条内容只推一次。按内容(title+body)分桶而非全局单桶 →
+# 重复的同一告警被压制，但不同的告警(如「权限申请待确认」vs「有事待确认」)不会互相挤掉而丢失。
 COOLDOWN=${NOTIFY_COOLDOWN:-300}
-STAMP="$HOME/.claude/.notify-last"
+# 顺手清理早已过期的旧桶文件（>1 天），避免不同内容的冷却戳在 ~/.claude 无限堆积。冷却窗最长几分钟，1 天前的戳必已失效。
+find "$HOME/.claude" -maxdepth 1 -name '.notify-last.*' -type f -mtime +1 -delete 2>/dev/null || true
+KEY=$(printf '%s' "$TEXT" | cksum | cut -d' ' -f1)   # cksum 零依赖，按内容生成桶键
+STAMP="$HOME/.claude/.notify-last.$KEY"
 now=$(date +%s)
 if [ -f "$STAMP" ]; then
   last=$(cat "$STAMP" 2>/dev/null)
