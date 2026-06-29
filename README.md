@@ -118,7 +118,7 @@ brew install terminal-notifier
 
 **延迟合并推送**：弹窗超时关窗后**不立即推**，把问题攒进队列、自首条起 +`defer_minutes`（默认 5 分钟）统一判定——这期间你在终端提交过输入（`UserPromptSubmit` hook 经 `mark-activity.sh` 刷新 `~/.claude/.last-user-prompt`）即视为已回来答话、**整窗免推**；否则 1 条单推、多条**合并成一条**。`notify-push.sh` 另用时间戳做 5 分钟冷却去重。权限申请窗超时则即时推一条「⏳ 权限申请待确认」。
 
-**权限门**（`enable_permission_gate` 开，依赖 `jq`）：PreToolUse 拦 Bash——**危险命令先判**（命中即避让给危险护栏，不被白名单遮蔽）、白名单放行、其余弹桌面授权窗（拒绝/允许/总是允许，默认高亮「允许」，「总是允许」自动养肥白名单 `Bash(首词 *)`）。窗口默认存活 60 秒（`PGATE_TIMEOUT` 可配），**超时自动关 → 推手机 + 回终端**，点「拒绝」才 deny；缺 `jq` 时告警放行而非静默吞。
+**权限门**（`enable_permission_gate` 开，依赖 `jq`）：PreToolUse 拦 Bash——**危险命令先判**（命中即避让给危险护栏，不被白名单遮蔽）、白名单放行（同时认**全局** `~/.claude/settings.json` 与**项目级** `$CLAUDE_PROJECT_DIR/.claude/settings{,.local}.json`，与 Claude Code 自身口径一致）、其余弹桌面授权窗（拒绝/允许/总是允许，默认高亮「允许」，「总是允许」自动养肥白名单 `Bash(首词 *)`）。窗口默认存活 60 秒（`PGATE_TIMEOUT` 可配），**超时自动关 → 推手机 + 回终端**，点「拒绝」才 deny；缺 `jq` 时告警放行而非静默吞。
 
 **智能切换**（`smart_switch`，**默认关**）：默认**始终弹**浮顶窗——不管开几个窗口/项目都看得到，最稳妥。**开启后**才用 `lsappinfo` 看前台是 Claude 宿主（各种终端 / VS Code（含 Cursor）/ JetBrains 全家 / Claude 桌面 app）则不弹、走终端问答。
 
